@@ -24,6 +24,10 @@ POLL_INTERVAL = 2.0
 # seconds a process gets after SIGTERM before SIGKILL; Slurm itself waits 30 s (KillWait) at the time limit
 STOP_GRACE = 15.0
 
+# the runtime has no CUDA compiler: DeepGEMM and FlashInfer's sampler compile kernels on first use and fail
+# without nvcc. The fallbacks are prebuilt (CUTLASS) or Triton. A variable set in .env or the shell wins
+RUNTIME_ENV = {"VLLM_USE_DEEP_GEMM": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+
 # health checks go straight to 127.0.0.1, whatever http_proxy says
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -162,12 +166,13 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     root, base_url = f"http://{HOST}:{port}", f"http://{HOST}:{port}/v1"
     env = environment()
     # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads
-    server_env = {**env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
+    server_env = {**RUNTIME_ENV, **env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
     record = {
         "model": spec.name,
         "repo": spec.repo,
         "revision": spec.revision,
         "vllm_args": argv[1:],
+        "vllm_env": {name: server_env[name] for name in RUNTIME_ENV},
         "versions": _versions(),
         "plyserve": {"commit": _git("rev-parse", "HEAD"), "dirty": bool(_git("status", "--porcelain"))},
         "base_url": base_url,

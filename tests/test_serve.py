@@ -24,7 +24,7 @@ args = sys.argv[1:]
 port = int(args[args.index("--port") + 1])
 key = os.environ["VLLM_API_KEY"]
 with open(os.environ["FAKE_RECORD"], "w") as record:
-    json.dump({"argv": args, "pid": os.getpid(), "key": key, "offline": os.environ.get("HF_HUB_OFFLINE"), "hf_home": os.environ.get("HF_HOME")}, record)
+    json.dump({"argv": args, "pid": os.getpid(), "key": key, "offline": os.environ.get("HF_HUB_OFFLINE"), "hf_home": os.environ.get("HF_HOME"), "deep_gemm": os.environ.get("VLLM_USE_DEEP_GEMM")}, record)
 if "FAKE_EXIT" in os.environ:
     sys.exit(int(os.environ["FAKE_EXIT"]))
 ready_at = time.monotonic() + float(os.environ.get("FAKE_HEALTH_DELAY", "0"))
@@ -104,6 +104,7 @@ def test_client_runs_against_the_server_and_its_code_is_returned(fake: Path) -> 
     assert vllm["key"] not in vllm["argv"]
     assert vllm["offline"] == "1"
     assert vllm["hf_home"] == str(fake / "home" / "hf")
+    assert vllm["deep_gemm"] == "0"
     assert _gone(vllm["pid"])
 
 
@@ -116,6 +117,7 @@ def test_run_record(fake: Path) -> None:
     assert record["model"] == "m-fp8" and record["repo"] == "org/model" and record["revision"] == "abc123"
     assert record["vllm_args"] == vllm["argv"]
     assert record["command"] == [sys.executable, "-c", "pass"]
+    assert record["vllm_env"] == {"VLLM_USE_DEEP_GEMM": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
     assert set(record["versions"]) == {"vllm", "torch", "transformers"}
     assert {"started_at", "ready_at", "plyserve", "gpus", "hostname"} <= set(record)
     assert vllm["key"] not in record_file.read_text()
@@ -126,6 +128,13 @@ def test_run_directory_is_named_after_the_slurm_job(fake: Path, monkeypatch: pyt
     serve(_SPEC, command=[sys.executable, "-c", "pass"])
     record = json.loads((fake / "home" / "runs" / "4242-m-fp8" / "server.json").read_text())
     assert record["slurm_job_id"] == "4242"
+
+
+def test_shell_can_turn_a_runtime_default_back_on(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # e.g. once a CUDA toolkit is available
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+    serve(_SPEC, command=[sys.executable, "-c", "pass"])
+    assert json.loads((fake / "vllm.json").read_text())["deep_gemm"] == "1"
 
 
 def test_waits_for_health(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
