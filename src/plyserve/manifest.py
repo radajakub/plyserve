@@ -4,9 +4,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-# plyserve runs from a clone of this repository (`uv sync` installs it editable), so the manifest is the one
-# at the repository root
-DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "models.toml"
+from plyserve.settings import REPOSITORY
+
+DEFAULT_MANIFEST = REPOSITORY / "models.toml"
 
 # flags plyserve sets from the served name and the run; a manifest that set them too would contradict it
 RESERVED_FLAGS = frozenset({"--model", "--revision", "--tokenizer", "--tokenizer-revision", "--served-model-name", "--host", "--port", "--api-key"})
@@ -47,7 +47,7 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, ModelSpec]:
         data = tomllib.load(handle)
     unknown_sections = set(data) - {"models"}
     if unknown_sections:
-        raise ValueError(f"{path}: unknown top-level keys {sorted(unknown_sections)}; models go under [models.\"<served name>\"]")
+        raise ValueError(f'{path}: unknown top-level keys {sorted(unknown_sections)}; models go under [models."<served name>"]')
     specs = {name: _spec(path, name, entry) for name, entry in data.get("models", {}).items()}
 
     ports: dict[int, str] = {}

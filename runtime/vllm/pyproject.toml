@@ -1,0 +1,31 @@
+# The pinned vLLM environment plyserve starts servers from. Built on RCI with `make runtime`; uv.lock next to
+# this file pins every package, so each clone gets the same vLLM, torch and CUDA libraries.
+#
+# The RCI H200 nodes run driver 575.51 (CUDA 12.9, checked 2026-10-11). vLLM's default PyPI wheel needs CUDA
+# 13.0, so vLLM comes from its CUDA 12.9 release wheel and torch from PyTorch's cu129 index. Both need
+# glibc >= 2.28, which RCI has exactly (EL8).
+[project]
+name = "plyserve-vllm"
+version = "0.31.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "vllm==0.31.0",
+    # the versions vllm 0.31.0 requires, named here so they resolve from the cu129 index
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+]
+
+[tool.uv]
+# an environment, not a package to build
+package = false
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl" }
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true

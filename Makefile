@@ -1,4 +1,27 @@
-.PHONY: cpu gpu gpu-h200
+.PHONY: test lint format fix runtime download cpu gpu gpu-h200
+
+test:
+	uv run --group dev pytest -q
+
+lint:
+	uv run --group dev ruff check .
+	uv run --group dev ruff format --check .
+
+format:
+	uv run ruff check --fix .
+	uv run ruff format .
+
+# Alias for format
+fix: format
+
+# The pinned vLLM environment (runtime/vllm/.venv, ~10 GB). Linux x86_64 only: run it on RCI
+runtime:
+	uv sync --project runtime/vllm
+
+# Weights at the pinned revision into $PLYSERVE_HOME/hf: make download MODEL=qwen-3.8-27b-fp8
+download:
+	@test -n "$(MODEL)" || (echo "usage: make download MODEL=<served name>  (uv run plyserve models lists them)" >&2; exit 1)
+	uv run plyserve download $(MODEL)
 
 # Interactive shells on RCI compute nodes, for trying things out by hand. Run them on the login node.
 # Every value can be overridden: make gpu-h200 TIME=0:30:00 MEM=128G
