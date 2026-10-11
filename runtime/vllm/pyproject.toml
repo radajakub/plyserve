@@ -13,6 +13,8 @@ dependencies = [
     # the versions vllm 0.31.0 requires, named here so they resolve from the cu129 index
     "torch==2.13.0",
     "torchvision==0.28.0",
+    # imported by transformers at vLLM startup; the PyPI build needs libcudart.so.13
+    "torchaudio==2.11.0",
 ]
 
 [tool.uv]
@@ -24,6 +26,7 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl" }
 torch = { index = "pytorch-cu129" }
 torchvision = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
