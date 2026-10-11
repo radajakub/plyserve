@@ -1,0 +1,26 @@
+# Models plyserve can serve, keyed by the served name. The served name is the contract with the clients:
+# plyllm's vllm registry uses the same string, so it should name the weights and the precision.
+#
+# repo, revision  Hugging Face checkpoint, pinned to a commit so a rerun loads the same weights
+# tunnel_port     VPS port a --tunnel opens for this model; unique, so two servers can tunnel at once
+# args            further `vllm serve` flags. plyserve sets the model, revision, served name, host, port
+#                 and API key itself, so those are refused here
+
+# Both models are FP8: half the memory of BF16, so more of the GPU holds the KV cache and more requests run
+# at once. Both are multimodal; --language-model-only skips the vision tower, since the inputs are text.
+
+# official FP8 checkpoint from Qwen; reasoning parser from the Qwen3.8 vLLM recipe
+[models."qwen-3.8-27b-fp8"]
+repo = "Qwen/Qwen3.8-27B-FP8"
+revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+tunnel_port = 18001
+args = ["--reasoning-parser", "qwen3", "--language-model-only", "--max-model-len", "65536"]
+
+# Google publishes no FP8 checkpoint, so vLLM quantizes the official BF16 weights to FP8 when it loads them.
+# Alternatives: RedHatAI/gemma-4-31B-it-FP8-dynamic (third-party, with published recovery numbers) or Google's
+# 4-bit QAT google/gemma-4-31B-it-qat-w4a16-ct
+[models."gemma-4-31b-fp8"]
+repo = "google/gemma-4-31B-it"
+revision = "842da3794eaa0b77d5f08bae87a17459d91ff475"
+tunnel_port = 18002
+args = ["--quantization", "fp8", "--reasoning-parser", "gemma4", "--language-model-only", "--max-model-len", "65536"]
