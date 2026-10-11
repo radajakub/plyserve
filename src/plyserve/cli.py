@@ -5,6 +5,7 @@ from pathlib import Path
 
 from plyserve.download import download
 from plyserve.manifest import DEFAULT_MANIFEST, ModelSpec, load_manifest
+from plyserve.serve import serve
 
 
 def _model(args: argparse.Namespace) -> ModelSpec:
@@ -23,6 +24,12 @@ def _download(args: argparse.Namespace) -> None:
     download(_model(args))
 
 
+def _serve(args: argparse.Namespace) -> None:
+    # argparse keeps the `--` that separates the client command on some Python versions
+    command = args.client[1:] if args.client[:1] == ["--"] else args.client
+    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="plyserve")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="models.toml to read (default: the one in this repository)")
@@ -33,6 +40,18 @@ def main(argv: list[str] | None = None) -> None:
     download_parser = commands.add_parser("download", help="fetch a model's weights at its pinned revision into $PLYSERVE_HOME/hf")
     download_parser.add_argument("model", help="served name from the manifest")
     download_parser.set_defaults(run=_download)
+
+    serve_parser = commands.add_parser("serve", help="serve a model on 127.0.0.1 and run a client command against it (mode 1)")
+    serve_parser.add_argument("model", help="served name from the manifest")
+    serve_parser.add_argument("--port", type=int, help="port for vLLM (default: a free one)")
+    serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for vLLM to load (default: 1800)")
+    serve_parser.add_argument(
+        "client",
+        nargs="*",
+        metavar="command",
+        help="after --: the client to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set; vLLM stops when it exits. Without it, serve until the job ends",
+    )
+    serve_parser.set_defaults(run=_serve)
 
     args = parser.parse_args(argv)
     try:

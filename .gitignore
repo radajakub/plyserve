@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Slurm logs of slurm/serve.sbatch, written to the submit directory
+plyserve-*.out
