@@ -15,6 +15,9 @@ dependencies = [
     "torchvision==0.28.0",
     # imported by transformers at vLLM startup; the PyPI build needs libcudart.so.13
     "torchaudio==2.11.0",
+    # imported by vLLM at startup for audio and video, which a text-only server never decodes. Neither PyPI
+    # nor the cu129 index has a CUDA 12.9 build of 0.17 (PyPI's needs libnvrtc.so.13), so the CPU build
+    "torchcodec==0.17.0",
 ]
 
 [tool.uv]
@@ -27,8 +30,14 @@ vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.31.0/v
 torch = { index = "pytorch-cu129" }
 torchvision = { index = "pytorch-cu129" }
 torchaudio = { index = "pytorch-cu129" }
+torchcodec = { index = "pytorch-cpu" }
 
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
