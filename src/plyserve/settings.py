@@ -38,11 +38,12 @@ def environment() -> dict[str, str]:
 
 
 def home() -> Path:
-    # weights, endpoint files and the API key. Required rather than defaulted, so ~90 GB of weights never land
-    # in a home folder by accident; on RCI it is a folder on /mnt/personal. $USER and ~ are expanded
+    # weights, run records and endpoint files. Required rather than defaulted, so ~90 GB of weights never land
+    # in a home folder by accident. Servers and clients in other jobs must see the same folder. $USER and ~ are
+    # expanded
     value = environment().get("PLYSERVE_HOME")
     if not value:
-        raise RuntimeError(f"PLYSERVE_HOME is not set; set it in {ENV_FILE} (see .env.example) to a folder on fast storage, e.g. /mnt/personal/$USER/plyserve-home")
+        raise RuntimeError(f"PLYSERVE_HOME is not set; set it in {ENV_FILE} (see .env.example) to a folder on fast storage that every node mounts")
     return Path(os.path.expandvars(value)).expanduser()
 
 

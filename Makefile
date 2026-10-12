@@ -1,4 +1,4 @@
-.PHONY: test lint format fix runtime download cpu gpu gpu-h200
+.PHONY: test lint format fix runtime download cpu gpu gpu-serve
 
 test:
 	uv run --group dev pytest -q
@@ -23,29 +23,32 @@ download:
 	@test -n "$(MODEL)" || (echo "usage: make download MODEL=<served name>  (uv run plyserve models lists them)" >&2; exit 1)
 	uv run plyserve download $(MODEL)
 
-# Interactive shells on RCI compute nodes, for trying things out by hand. Run them on the login node.
-# Every value can be overridden: make gpu-h200 TIME=0:30:00 MEM=128G
+# Interactive shells on Slurm compute nodes, for trying things out by hand. Run them on the login node.
+# Every value can be overridden: make gpu-serve TIME=0:30:00 MEM=128G
+# The partitions are site settings: set CPU_PARTITION, GPU_PARTITION and SERVE_PARTITION in local.mk
+# (gitignored; docs/ has the values for known clusters). An empty one leaves the choice to Slurm.
+-include local.mk
 TIME ?= 1:00:00
 
-# CPU node on the 4-hour partition
-cpu: PARTITION ?= cpufast
+# a CPU node
+cpu: PARTITION ?= $(CPU_PARTITION)
 cpu: CPUS ?= 4
 cpu: MEM ?= 16G
 cpu:
-	srun -p $(PARTITION) -t $(TIME) -c $(CPUS) --mem=$(MEM) --pty bash -i
+	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --pty bash -i
 
-# one V100 on the 4-hour partition, the shortest queue for checking that something sees a GPU
-gpu: PARTITION ?= gpufast
+# any GPU, the shortest queue for checking that something sees one
+gpu: PARTITION ?= $(GPU_PARTITION)
 gpu: CPUS ?= 8
 gpu: MEM ?= 32G
 gpu: GPUS ?= 1
 gpu:
-	srun -p $(PARTITION) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
+	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
 
-# one H200 NVL on the 4-hour partition, the GPU the models are served on
-gpu-h200: PARTITION ?= h200fast
-gpu-h200: CPUS ?= 16
-gpu-h200: MEM ?= 64G
-gpu-h200: GPUS ?= 1
-gpu-h200:
-	srun -p $(PARTITION) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
+# the GPU the models are served on, with the resources of slurm/serve.sbatch
+gpu-serve: PARTITION ?= $(SERVE_PARTITION)
+gpu-serve: CPUS ?= 16
+gpu-serve: MEM ?= 64G
+gpu-serve: GPUS ?= 1
+gpu-serve:
+	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i

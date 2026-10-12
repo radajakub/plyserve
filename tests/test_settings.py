@@ -34,8 +34,8 @@ def test_shell_wins_over_env_file(no_env_file: Path, monkeypatch: pytest.MonkeyP
 def test_home_from_env_file_expands_variables(no_env_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PLYSERVE_HOME", raising=False)
     monkeypatch.setenv("USER", "someone")
-    no_env_file.write_text("PLYSERVE_HOME=/mnt/personal/$USER/plyserve-home\n")
-    assert home() == Path("/mnt/personal/someone/plyserve-home")
+    no_env_file.write_text("PLYSERVE_HOME=/data/$USER/plyserve-home\n")
+    assert home() == Path("/data/someone/plyserve-home")
 
 
 def test_home_is_required(monkeypatch: pytest.MonkeyPatch) -> None:

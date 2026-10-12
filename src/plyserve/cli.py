@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from plyserve.download import download
+from plyserve.endpoint import find_endpoint, shell_exports
 from plyserve.manifest import DEFAULT_MANIFEST, ModelSpec, load_manifest
 from plyserve.serve import serve
 
@@ -27,7 +28,11 @@ def _download(args: argparse.Namespace) -> None:
 def _serve(args: argparse.Namespace) -> None:
     # argparse keeps the `--` that separates the client command on some Python versions
     command = args.client[1:] if args.client[:1] == ["--"] else args.client
-    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command))
+    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose))
+
+
+def _endpoint(args: argparse.Namespace) -> None:
+    print(shell_exports(find_endpoint(_model(args).name, wait=args.wait, timeout=args.timeout)))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -41,8 +46,11 @@ def main(argv: list[str] | None = None) -> None:
     download_parser.add_argument("model", help="served name from the manifest")
     download_parser.set_defaults(run=_download)
 
-    serve_parser = commands.add_parser("serve", help="serve a model on 127.0.0.1 and run a client command against it (mode 1)")
+    serve_parser = commands.add_parser("serve", help="serve a model, optionally running a client command against it")
     serve_parser.add_argument("model", help="served name from the manifest")
+    serve_parser.add_argument(
+        "--expose", action="store_true", help="listen for other nodes too and publish the endpoint in $PLYSERVE_HOME/endpoints (see PLYSERVE_EXPOSE_* in .env.example)"
+    )
     serve_parser.add_argument("--port", type=int, help="port for vLLM (default: a free one)")
     serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for vLLM to load (default: 1800)")
     serve_parser.add_argument(
@@ -52,6 +60,12 @@ def main(argv: list[str] | None = None) -> None:
         help="after --: the client to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set; vLLM stops when it exits. Without it, serve until the job ends",
     )
     serve_parser.set_defaults(run=_serve)
+
+    endpoint_parser = commands.add_parser("endpoint", help='print exports for a server started with --expose: eval "$(plyserve endpoint <model>)"')
+    endpoint_parser.add_argument("model", help="served name from the manifest")
+    endpoint_parser.add_argument("--wait", action="store_true", help="wait until the server answers, e.g. while its job is queued or loading")
+    endpoint_parser.add_argument("--timeout", type=float, help="with --wait: give up after this many seconds (default: never)")
+    endpoint_parser.set_defaults(run=_endpoint)
 
     args = parser.parse_args(argv)
     try:

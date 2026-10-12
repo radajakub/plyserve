@@ -221,3 +221,6 @@ __marimo__/
 
 # Slurm logs of slurm/serve.sbatch, written to the submit directory
 plyserve-*.out
+
+# site settings for the Makefile (partitions); see docs/
+local.mk

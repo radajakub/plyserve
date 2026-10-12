@@ -1,11 +1,11 @@
 #!/bin/bash
-# Serve a model and run a client against it in one job (mode 1):
-#   sbatch slurm/serve.sbatch qwen-3.8-27b-fp8 uv run --project ~/classifier python classify.py
-# Without a client command it serves until the time limit. Resources can be overridden on the command line:
-#   sbatch -t 1-00:00:00 -p h200 slurm/serve.sbatch ...
-# Submit from the plyserve clone, or set PLYSERVE_REPO to it. The client runs in the submit directory.
+# `plyserve serve` as a batch job; the arguments are those of `plyserve serve`.
+#   server and client in one job:  sbatch slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
+#   server for clients elsewhere:  sbatch slurm/serve.sbatch --expose qwen-3.8-27b-fp8
+# The resources below fit one ~30B FP8 model on one GPU. Choose the partition (and override anything else) on
+# the command line or through Slurm's SBATCH_* variables: sbatch -p <partition> -t 1-00:00:00 slurm/serve.sbatch ...
+# Submit from the plyserve clone, or set PLYSERVE_REPO to it. A client command runs in the submit directory.
 #SBATCH --job-name=plyserve
-#SBATCH --partition=h200fast
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -19,11 +19,9 @@ if [[ ! -x $repo/.venv/bin/plyserve ]]; then
     exit 2
 fi
 if [[ $# -lt 1 ]]; then
-    echo "usage: sbatch slurm/serve.sbatch <model> [client command...]" >&2
+    echo "usage: sbatch slurm/serve.sbatch [--expose] <model> [-- client command...]" >&2
     exit 2
 fi
-model=$1
-shift
 
 # the installed entry point rather than `uv run`, so the job never syncs the environment
-exec "$repo/.venv/bin/plyserve" serve "$model" -- "$@"
+exec "$repo/.venv/bin/plyserve" serve "$@"

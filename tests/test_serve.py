@@ -1,8 +1,11 @@
+import http.server
 import json
 import os
 import signal
 import sys
 import textwrap
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -10,8 +13,9 @@ import pytest
 from plyserve import serve as serve_module
 from plyserve import settings
 from plyserve.cli import main
+from plyserve.endpoint import Endpoint, endpoint_path, write_endpoint
 from plyserve.manifest import ModelSpec
-from plyserve.serve import client_environment, serve
+from plyserve.serve import addresses, client_environment, serve
 
 _SPEC = ModelSpec("m-fp8", "org/model", "abc123", 18001, ("--max-model-len", "1024"))
 
@@ -42,7 +46,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+server = http.server.HTTPServer((args[args.index("--host") + 1], port), Handler)
 if "FAKE_LIFETIME" in os.environ:
     threading.Timer(float(os.environ["FAKE_LIFETIME"]), lambda: os._exit(0)).start()
 server.serve_forever()
@@ -75,6 +79,10 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("PLYSERVE_HOME", str(home))
     monkeypatch.setenv("FAKE_RECORD", str(tmp_path / "vllm.json"))
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.delenv("PLYSERVE_API_KEY", raising=False)
+    # --expose on the loopback address, so the tests open no port to the network
+    monkeypatch.setenv("PLYSERVE_EXPOSE_BIND", "127.0.0.1")
+    monkeypatch.setenv("PLYSERVE_EXPOSE_HOST", "127.0.0.1")
     monkeypatch.setattr(serve_module, "POLL_INTERVAL", 0.05)
     monkeypatch.setattr(serve_module, "STOP_GRACE", 5.0)
     return tmp_path
@@ -185,6 +193,77 @@ def test_missing_weights_say_how_to_fetch_them(fake: Path) -> None:
         serve(ModelSpec("other", "org/other", "def456", 18002, ()))
 
 
+def test_fixed_api_key_from_the_environment(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLYSERVE_API_KEY", "fixed-key")
+    out = fake / "client.json"
+    serve(_SPEC, command=[sys.executable, "-c", _CLIENT, str(out)])
+    assert json.loads(out.read_text())["VLLM_API_KEY"] == "fixed-key"
+    [record_file] = (fake / "home" / "runs").glob("*/server.json")
+    assert json.loads(record_file.read_text())["api_key"] == "fixed (PLYSERVE_API_KEY)"
+    assert "fixed-key" not in record_file.read_text()
+
+
+def test_expose_publishes_an_endpoint_while_serving(fake: Path) -> None:
+    # the client stands in for a client job: it finds the server through `plyserve endpoint` and calls it
+    out, manifest = fake / "client.json", fake / "models.toml"
+    manifest.write_text('[models."m-fp8"]\nrepo = "org/model"\nrevision = "abc123"\ntunnel_port = 18001\n')
+    client_py = fake / "client.py"
+    client_py.write_text(_CLIENT)
+    src = Path(__file__).resolve().parents[1] / "src"
+    script = f'eval "$(PYTHONPATH={src} {sys.executable} -m plyserve --manifest {manifest} endpoint m-fp8)" && {sys.executable} {client_py} {out}'
+
+    assert serve(_SPEC, expose=True, command=["bash", "-c", script]) == 3
+
+    vllm, client = json.loads((fake / "vllm.json").read_text()), json.loads(out.read_text())
+    port = vllm["argv"][vllm["argv"].index("--port") + 1]
+    assert vllm["argv"][vllm["argv"].index("--host") + 1] == "127.0.0.1"
+    assert client["status"] == 200 and client["VLLM_API_KEY"] == vllm["key"]
+    assert client["VLLM_BASE_URL"] == f"http://127.0.0.1:{port}/v1"
+    assert not endpoint_path("m-fp8").exists()  # removed once the server stopped
+    [record_file] = (fake / "home" / "runs").glob("*/server.json")
+    assert json.loads(record_file.read_text())["exposed"] is True
+
+
+@pytest.fixture
+def healthy_server() -> Iterator[str]:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/v1"
+    server.shutdown()
+
+
+def _endpoint(base_url: str, server_id: str = "other") -> Endpoint:
+    return Endpoint("m-fp8", base_url, "k", server_id, "elsewhere", "99", "2026-10-11T00:00:00+00:00", "/runs/99")
+
+
+def test_expose_refuses_a_second_server_for_the_model(fake: Path, healthy_server: str) -> None:
+    write_endpoint(_endpoint(healthy_server))
+    with pytest.raises(RuntimeError, match=r"already served at .*\(job 99 on elsewhere\)"):
+        serve(_SPEC, expose=True)
+    assert not (fake / "vllm.json").exists()  # vLLM was never started
+
+
+def test_expose_replaces_a_stale_endpoint(fake: Path) -> None:
+    write_endpoint(_endpoint("http://127.0.0.1:9/v1"))  # nothing answers there
+    assert serve(_SPEC, expose=True, command=[sys.executable, "-c", "pass"]) == 0
+    assert not endpoint_path("m-fp8").exists()
+
+
+def test_expose_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("socket.gethostname", lambda: "node7")
+    assert addresses({}, expose=False) == ("127.0.0.1", "127.0.0.1")
+    assert addresses({}, expose=True) == ("0.0.0.0", "node7")
+    assert addresses({"PLYSERVE_EXPOSE_BIND": "10.0.0.5", "PLYSERVE_EXPOSE_HOST": "gpu7.ib"}, expose=True) == ("10.0.0.5", "gpu7.ib")
+
+
 def test_client_leaves_plyserve_venv(monkeypatch: pytest.MonkeyPatch) -> None:
     venv = settings.REPOSITORY / ".venv"
     env = {"VIRTUAL_ENV": str(venv), "PATH": os.pathsep.join([str(venv / "bin"), "/usr/bin"]), "no_proxy": "example.org"}
@@ -218,4 +297,13 @@ def test_cli_without_a_client_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _SPEC})
     with pytest.raises(SystemExit):
         main(["serve", "m-fp8", "--"])
-    assert calls[0]["command"] == [] and calls[0]["port"] is None
+    assert calls[0]["command"] == [] and calls[0]["port"] is None and calls[0]["expose"] is False
+
+
+def test_cli_expose(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr("plyserve.cli.serve", lambda spec, **kwargs: calls.append(kwargs) or 0)
+    monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _SPEC})
+    with pytest.raises(SystemExit):
+        main(["serve", "--expose", "m-fp8"])
+    assert calls[0]["expose"] is True and calls[0]["command"] == []
