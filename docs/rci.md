@@ -80,7 +80,8 @@ uv run plyserve serve qwen-3.8-27b-fp8 -- bash -c 'curl -s -H "Authorization: Be
 Expected: `0.31.0 12.9 NVIDIA H200 NVL`, then the vLLM log, `plyserve: qwen-3.8-27b-fp8 is ready at ...` and
 the model list. On 2026-10-11 Qwen3.8-27B-FP8 took ~2 min 10 s from start to ready (weights 3 s, torch.compile
 36 s, warmup 44 s, CUDA graphs ~12 s), used 27.6 GiB for weights and left 95 GiB for the KV cache
-(~1.45 M tokens).
+(~1.45 M tokens). Later starts reuse the torch.compile cache in `~/.cache/vllm`: on 2026-10-12 the same
+model was ready in ~45 s.
 
 Do not run `serve` or `vllm serve --help` on the login node: it has no GPU, and vLLM fails to detect a device.
 
@@ -159,5 +160,6 @@ curl -s -H "Authorization: Bearer <PLYSERVE_API_KEY>" http://127.0.0.1:18001/v1/
 - **Mode 2 checked** on 2026-10-12: server job on `h02` (H200), client on `n06`; `scancel` stopped vLLM and
   removed the endpoint file. Stop an `--expose` server with `scancel`, not by killing processes.
 - **Mode 3 checked** on 2026-10-12: `serve --tunnel` in an H200 job; `/v1/models` answered on the VPS at
-  `127.0.0.1:18001` with the fixed key.
+  `127.0.0.1:18001` with the fixed key. `--expose --tunnel` in one job then served a client job and the VPS at
+  the same time (job 11785372); the tunnel did not drop, and `scancel` stopped it.
 - **Not yet checked:** reconnecting after a real drop, and RCI's policy on long-lived listeners and tunnels.
