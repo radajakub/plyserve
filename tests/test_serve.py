@@ -307,3 +307,107 @@ def test_cli_expose(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
         main(["serve", "--expose", "m-fp8"])
     assert calls[0]["expose"] is True and calls[0]["command"] == []
+
+
+# stands in for ssh: records each start (argv, pid) as a line in FAKE_SSH_RECORD, stays up for the next of the comma-separated FAKE_SSH_LIFETIMES
+# (the last one repeats) and exits with 255, as ssh does when its connection fails
+_FAKE_SSH = """
+import json, os, sys, time
+record = os.environ["FAKE_SSH_RECORD"]
+starts = open(record).read().count("\\n") if os.path.exists(record) else 0
+with open(record, "a") as handle:
+    handle.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid()}) + "\\n")
+lifetimes = [float(value) for value in os.environ.get("FAKE_SSH_LIFETIMES", "60").split(",")]
+time.sleep(lifetimes[min(starts, len(lifetimes) - 1)])
+sys.exit(255)
+"""
+
+
+@pytest.fixture
+def fake_ssh(fake: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = fake / "ssh-bin"
+    bin_dir.mkdir()
+    ssh = bin_dir / "ssh"
+    ssh.write_text(f"#!{sys.executable}\n{textwrap.dedent(_FAKE_SSH)}")
+    ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
+    monkeypatch.setenv("FAKE_SSH_RECORD", str(fake / "ssh.jsonl"))
+    monkeypatch.setenv("PLYSERVE_API_KEY", "fixed-key")
+    monkeypatch.setenv("PLYSERVE_TUNNEL_HOST", "tunnel@vps")
+    monkeypatch.delenv("PLYSERVE_TUNNEL_KEY", raising=False)
+    monkeypatch.delenv("PLYSERVE_TUNNEL_BIND", raising=False)
+    monkeypatch.setattr(serve_module, "TUNNEL_SETTLE", 0.3)
+    monkeypatch.setattr(serve_module, "TUNNEL_RETRY", (0.05, 0.2))
+    return fake / "ssh.jsonl"
+
+
+def _starts(record: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def test_tunnel_forwards_the_model_port_while_serving(fake: Path, fake_ssh: Path) -> None:
+    # the client checks that the tunnel is up while it runs
+    client = f"import os, sys; sys.exit(0 if os.path.exists({str(fake_ssh)!r}) else 9)"
+    assert serve(_SPEC, tunnel=True, command=[sys.executable, "-c", client]) == 0
+
+    vllm = json.loads((fake / "vllm.json").read_text())
+    port = vllm["argv"][vllm["argv"].index("--port") + 1]
+    [start] = _starts(fake_ssh)
+    assert start["argv"][:3] == ["-N", "-R", f"127.0.0.1:18001:127.0.0.1:{port}"]
+    assert "BatchMode=yes" in start["argv"] and "ExitOnForwardFailure=yes" in start["argv"]
+    assert start["argv"][-1] == "tunnel@vps"
+    assert _gone(start["pid"]) and _gone(vllm["pid"])
+    [record_file] = (fake / "home" / "runs").glob("*/server.json")
+    assert json.loads(record_file.read_text())["tunnel"] == ["ssh", *start["argv"]]
+
+
+def test_tunnel_key_and_bind_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", "/home/u")
+    env = {"PLYSERVE_TUNNEL_HOST": "vps", "PLYSERVE_TUNNEL_KEY": "~/.ssh/plyserve", "PLYSERVE_TUNNEL_BIND": "172.17.0.1"}
+    argv = serve_module.tunnel_argv(env, 18002, "127.0.0.1:5000")
+    assert argv[3] == "172.17.0.1:18002:127.0.0.1:5000"
+    assert argv[-5:] == ["-i", "/home/u/.ssh/plyserve", "-o", "IdentitiesOnly=yes", "vps"]
+
+
+@pytest.mark.parametrize(("unset", "message"), [("PLYSERVE_API_KEY", "fixed PLYSERVE_API_KEY"), ("PLYSERVE_TUNNEL_HOST", "PLYSERVE_TUNNEL_HOST")])
+def test_tunnel_needs_its_settings(fake: Path, fake_ssh: Path, monkeypatch: pytest.MonkeyPatch, unset: str, message: str) -> None:
+    monkeypatch.delenv(unset)
+    with pytest.raises(RuntimeError, match=message):
+        serve(_SPEC, tunnel=True)
+    assert not (fake / "vllm.json").exists()  # vLLM was never started
+
+
+def test_tunnel_that_fails_at_first_stops_serve(fake: Path, fake_ssh: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_SSH_LIFETIMES", "0")
+    with pytest.raises(RuntimeError, match="ssh exited with code 255 while opening the tunnel to tunnel@vps"):
+        serve(_SPEC, tunnel=True, command=[sys.executable, "-c", "pass"])
+    assert len(_starts(fake_ssh)) == 1  # no retry
+    assert _gone(json.loads((fake / "vllm.json").read_text())["pid"])
+
+
+def test_tunnel_reconnects_after_a_drop(fake: Path, fake_ssh: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    # up long enough to count as connected, then two quick failures, then up for good
+    monkeypatch.setenv("FAKE_SSH_LIFETIMES", "0.5,0,0,60")
+    client = f"import time, sys\nwhile open({str(fake_ssh)!r}).read().count('\\n') < 4: time.sleep(0.05)\ntime.sleep(0.3)"
+    assert serve(_SPEC, tunnel=True, command=[sys.executable, "-c", client]) == 0
+
+    starts = _starts(fake_ssh)
+    assert len(starts) == 4 and all(start["argv"] == starts[0]["argv"] for start in starts)
+    assert all(_gone(start["pid"]) for start in starts)
+    out = capsys.readouterr().out
+    assert "dropped (ssh exit code 255); reconnecting in 0.05 s" in out and "reconnecting in 0.1 s" in out and "reconnecting in 0.2 s" in out
+
+
+def test_sigterm_stops_the_tunnel(fake: Path, fake_ssh: Path) -> None:
+    assert serve(_SPEC, tunnel=True, command=[sys.executable, "-c", f"import os, signal, time; os.kill({os.getpid()}, signal.SIGTERM); time.sleep(60)"]) == 128 + signal.SIGTERM
+    [start] = _starts(fake_ssh)
+    assert _gone(start["pid"])
+
+
+def test_cli_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr("plyserve.cli.serve", lambda spec, **kwargs: calls.append(kwargs) or 0)
+    monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _SPEC})
+    with pytest.raises(SystemExit):
+        main(["serve", "--tunnel", "m-fp8"])
+    assert calls[0]["tunnel"] is True and calls[0]["expose"] is False

@@ -28,7 +28,7 @@ def _download(args: argparse.Namespace) -> None:
 def _serve(args: argparse.Namespace) -> None:
     # argparse keeps the `--` that separates the client command on some Python versions
     command = args.client[1:] if args.client[:1] == ["--"] else args.client
-    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose))
+    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose, tunnel=args.tunnel))
 
 
 def _endpoint(args: argparse.Namespace) -> None:
@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> None:
     serve_parser.add_argument("model", help="served name from the manifest")
     serve_parser.add_argument(
         "--expose", action="store_true", help="listen for other nodes too and publish the endpoint in $PLYSERVE_HOME/endpoints (see PLYSERVE_EXPOSE_* in .env.example)"
+    )
+    serve_parser.add_argument(
+        "--tunnel", action="store_true", help="forward the model's tunnel_port on another machine to the server over SSH (see PLYSERVE_TUNNEL_* in .env.example)"
     )
     serve_parser.add_argument("--port", type=int, help="port for vLLM (default: a free one)")
     serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for vLLM to load (default: 1800)")

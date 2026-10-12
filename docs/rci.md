@@ -96,11 +96,51 @@ sbatch -p h200fast slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/cla
 sbatch -p h200fast slurm/serve.sbatch --expose qwen-3.8-27b-fp8
 # in each client job (any partition):
 eval "$(/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait qwen-3.8-27b-fp8)"
+
+# mode 3: server in a job, client on your own machine (see "Tunnel" below)
+sbatch -p h200fast slurm/serve.sbatch --tunnel qwen-3.8-27b-fp8
 ```
 
 `h200fast` is the short-queue partition; longer runs go to `h200`, `h200long` or `h200extralong` with a matching
 `-t`. Job logs go to `plyserve-<job id>.out` in the submit directory; run records to
 `$PLYSERVE_HOME/runs/<job id>-<model>/server.json`.
+
+## Tunnel (mode 3)
+
+The general setup is in the README. On RCI, `~/.ssh` is the same on the login and compute nodes, so the key and
+the saved host key are made once on the login node:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C plyserve-tunnel -f ~/.ssh/plyserve_tunnel
+cat ~/.ssh/plyserve_tunnel.pub   # add it to the client machine's authorized_keys, limited as in the README
+```
+
+In `.env`:
+
+```bash
+PLYSERVE_API_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(32))">
+PLYSERVE_TUNNEL_HOST=<user>@<client machine>
+PLYSERVE_TUNNEL_KEY=~/.ssh/plyserve_tunnel
+```
+
+Check, before the first GPU job, that a compute node reaches the client machine (it saves the host key; with
+`command="/bin/false"` it ends with exit code 1, which is expected):
+
+```bash
+make cpu
+# on the node:
+ssh -i ~/.ssh/plyserve_tunnel <user>@<client machine> true; echo "exit $?"
+```
+
+Then a test (~3 min on `h200fast`; it ends when the client command ends):
+
+```bash
+make gpu-serve
+# on the node:
+uv run plyserve serve --tunnel qwen-3.8-27b-fp8 -- sleep 600
+# on the client machine, while it sleeps:
+curl -s -H "Authorization: Bearer <PLYSERVE_API_KEY>" http://127.0.0.1:18001/v1/models
+```
 
 ## Known issues
 
@@ -118,4 +158,6 @@ eval "$(/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait qwen-3.8
 - **Caches in home.** vLLM's torch.compile cache goes to `~/.cache/vllm` (~31 MB per model so far).
 - **Mode 2 checked** on 2026-10-12: server job on `h02` (H200), client on `n06`; `scancel` stopped vLLM and
   removed the endpoint file. Stop an `--expose` server with `scancel`, not by killing processes.
-- **Not yet checked:** RCI's policy on long-lived listeners and tunnels.
+- **Mode 3 checked** on 2026-10-12: `serve --tunnel` in an H200 job; `/v1/models` answered on the VPS at
+  `127.0.0.1:18001` with the fixed key.
+- **Not yet checked:** reconnecting after a real drop, and RCI's policy on long-lived listeners and tunnels.

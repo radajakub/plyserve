@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -24,6 +25,12 @@ EXPOSE_BIND = "0.0.0.0"
 POLL_INTERVAL = 2.0
 # seconds a process gets after SIGTERM before SIGKILL; Slurm itself waits 30 s (KillWait) at the time limit
 STOP_GRACE = 15.0
+# with --tunnel, unless PLYSERVE_TUNNEL_BIND says otherwise: the remote machine's loopback, so only processes on that machine reach the server
+TUNNEL_BIND = "127.0.0.1"
+# seconds the first ssh must stay up to count as connected; a failure within them is a setup error and stops serve
+TUNNEL_SETTLE = 10.0
+# seconds before reconnecting a dropped tunnel: the first delay, doubled after each failed attempt up to the second
+TUNNEL_RETRY = (1.0, 60.0)
 
 # the runtime has no CUDA compiler: DeepGEMM and FlashInfer's sampler compile kernels on first use and fail
 # without nvcc. The fallbacks are prebuilt (CUTLASS) or Triton. A variable set in .env or the shell wins
@@ -92,6 +99,56 @@ def client_environment(env: dict[str, str], base_url: str, key: str, model: str)
     return client
 
 
+def tunnel_argv(env: dict[str, str], remote_port: int, local: str) -> list[str]:
+    # ssh -R: <bind>:<remote_port> on the remote machine forwards to `local` (host:port of vLLM) here. BatchMode never prompts, since a job has no terminal;
+    # ExitOnForwardFailure exits when the remote port is taken, so a retry follows; ServerAlive notices a dead connection within ~90 s
+    target = env.get("PLYSERVE_TUNNEL_HOST")
+    if not target:
+        raise RuntimeError("--tunnel needs PLYSERVE_TUNNEL_HOST, the SSH destination (see .env.example)")
+    bind = env.get("PLYSERVE_TUNNEL_BIND") or TUNNEL_BIND
+    options = ("BatchMode=yes", "ExitOnForwardFailure=yes", "ServerAliveInterval=30", "ServerAliveCountMax=3")
+    argv = ["ssh", "-N", "-R", f"{bind}:{remote_port}:{local}", *(part for option in options for part in ("-o", option))]
+    if key := env.get("PLYSERVE_TUNNEL_KEY"):
+        argv += ["-i", str(Path(os.path.expandvars(key)).expanduser()), "-o", "IdentitiesOnly=yes"]
+    return [*argv, target]
+
+
+class _Tunnel:
+    # the ssh behind --tunnel; when it drops, it is started again with growing delays while vLLM keeps serving
+    def __init__(self, argv: list[str], env: dict[str, str]) -> None:
+        self.argv, self.env = argv, env
+        self.delay, self.retry_at = TUNNEL_RETRY[0], None
+        self.process = self._start()
+
+    def _start(self) -> subprocess.Popen[bytes]:
+        self.started = time.monotonic()
+        # its own session, so a Ctrl-C reaches only plyserve, which stops the tunnel itself
+        return subprocess.Popen(self.argv, env=self.env, stdin=subprocess.DEVNULL, start_new_session=True)
+
+    def wait_until_up(self) -> None:
+        # a first attempt that fails is a setup error (host, key, known_hosts, remote port taken), which retrying does not fix
+        while time.monotonic() - self.started < TUNNEL_SETTLE:
+            if (code := self.process.poll()) is not None:
+                raise RuntimeError(f"ssh exited with code {code} while opening the tunnel to {self.argv[-1]}; its message is above")
+            time.sleep(POLL_INTERVAL)
+
+    def check(self) -> None:
+        if self.retry_at is None:
+            if (code := self.process.poll()) is None:
+                return
+            if time.monotonic() - self.started > TUNNEL_RETRY[1]:
+                self.delay = TUNNEL_RETRY[0]  # it was up for a while, so this is a new drop rather than another failed attempt
+            print(f"plyserve: the tunnel to {self.argv[-1]} dropped (ssh exit code {code}); reconnecting in {self.delay:g} s", flush=True)
+            self.retry_at = time.monotonic() + self.delay
+            self.delay = min(2 * self.delay, TUNNEL_RETRY[1])
+        elif time.monotonic() >= self.retry_at:
+            self.retry_at = None
+            self.process = self._start()
+
+    def stop(self) -> None:
+        _stop(self.process, group=True)
+
+
 def _wait_until_ready(process: subprocess.Popen[bytes], url: str, key: str, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while not healthy(url, key):
@@ -151,10 +208,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False) -> int:
+def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False, tunnel: bool = False) -> int:
     # starts vLLM, waits until it answers, then runs `command` against it and stops vLLM when the command ends;
     # without a command it serves until vLLM exits. Returns the exit code of the command (or of vLLM).
-    # `expose` makes the server reachable from other nodes and publishes it in an endpoint file
+    # `expose` makes the server reachable from other nodes and publishes it in an endpoint file;
+    # `tunnel` forwards the model's tunnel_port on another machine to it over SSH
     executable, weights = runtime_executable("vllm"), snapshot(spec)
     if not weights.is_dir():
         raise FileNotFoundError(f"{weights} does not exist; fetch the weights with `make download MODEL={spec.name}`")
@@ -162,12 +220,19 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     bind, host = addresses(env, expose)
     if expose and (current := read_endpoint(spec.name)) is not None and healthy(current.health_url, current.api_key):
         raise RuntimeError(f"{spec.name} is already served at {current.base_url} (job {current.slurm_job_id or '-'} on {current.hostname}); stop that server first")
+    # a client behind the tunnel keeps its key from run to run, so a per-run key cannot reach it
+    if tunnel and not env.get("PLYSERVE_API_KEY"):
+        raise RuntimeError("--tunnel needs a fixed PLYSERVE_API_KEY, the same one the remote client uses (see .env.example)")
+    if tunnel and shutil.which("ssh", path=env.get("PATH")) is None:
+        raise RuntimeError("--tunnel needs ssh, which is not on PATH")
     port = port or free_port(bind)
     # a fixed key from .env lets clients outside the cluster keep theirs; otherwise a new one for every run
     key = env.get("PLYSERVE_API_KEY") or secrets.token_urlsafe(32)
     argv = [str(executable), *spec.vllm_args(bind, port)]
-    # this job reaches the server on the loopback address whatever it listens on (IPv4 only)
-    local = f"http://{HOST if bind == EXPOSE_BIND else bind}:{port}"
+    # this job (and the tunnel) reaches the server on the loopback address whatever it listens on (IPv4 only)
+    local_host = HOST if bind == EXPOSE_BIND else bind
+    local = f"http://{local_host}:{port}"
+    ssh_argv = tunnel_argv(env, spec.tunnel_port, f"{local_host}:{port}") if tunnel else None
     base_url = f"http://{host}:{port}/v1"
     # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads
     server_env = {**RUNTIME_ENV, **env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
@@ -181,6 +246,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
         "plyserve": {"commit": _git("rev-parse", "HEAD"), "dirty": bool(_git("status", "--porcelain"))},
         "base_url": base_url,
         "exposed": expose,
+        "tunnel": ssh_argv,
         "api_key": "fixed (PLYSERVE_API_KEY)" if env.get("PLYSERVE_API_KEY") else "per run",
         "command": list(command),
         "slurm_job_id": env.get("SLURM_JOB_ID"),
@@ -190,7 +256,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     }
 
     previous = {name: signal.signal(name, _on_signal) for name in (signal.SIGTERM, signal.SIGINT)}
-    vllm, published = None, None
+    vllm, published, forward = None, None, None
     try:
         vllm = subprocess.Popen(argv, env=server_env, start_new_session=True)
         _wait_until_ready(vllm, f"{local}/health", key, timeout)
@@ -203,23 +269,32 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
             published = Endpoint(spec.name, base_url, key, secrets.token_hex(8), record["hostname"], record["slurm_job_id"], record["ready_at"], str(run_dir))
             write_endpoint(published)
             print(f"plyserve: endpoint published in {endpoint_path(spec.name)}", flush=True)
-        if not command:
-            return vllm.wait()
+        if ssh_argv is not None:
+            forward = _Tunnel(ssh_argv, env)
+            forward.wait_until_up()
+            print(f"plyserve: tunnel open, {ssh_argv[-1]} forwards {ssh_argv[3].rsplit(':', 2)[0]} to this server", flush=True)
 
-        client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name))
+        client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name)) if command else None
         try:
-            while (code := client.poll()) is None:
+            while client is None or (code := client.poll()) is None:
                 if (server_code := vllm.poll()) is not None:
+                    if client is None:
+                        return server_code
                     raise RuntimeError(f"vLLM exited with code {server_code} while the client was running; its log is above")
+                if forward is not None:
+                    forward.check()
                 time.sleep(POLL_INTERVAL)
             return code
         finally:
-            _stop(client, group=False)
+            if client is not None:
+                _stop(client, group=False)
     except _Stopped as stopped:
         print(f"plyserve: {stopped}, stopping", flush=True)
         return 128 + stopped.signum
     finally:
         # clients stop finding the server before it goes away
+        if forward is not None:
+            forward.stop()
         if published is not None:
             remove_endpoint(published)
         if vllm is not None:
