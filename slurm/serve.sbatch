@@ -23,5 +23,12 @@ if [[ $# -lt 1 ]]; then
     exit 2
 fi
 
+# the site's toolchain for vLLM's kernels (CUDA toolkit, C++ compiler), e.g. `module load` lines; gitignored, see docs/
+if [[ -f $repo/slurm/site.sh ]]; then
+    set +u  # module systems (Lmod) read unset variables
+    source "$repo/slurm/site.sh"
+    set -u
+fi
+
 # the installed entry point rather than `uv run`, so the job never syncs the environment
 exec "$repo/.venv/bin/plyserve" serve "$@"

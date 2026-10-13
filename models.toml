@@ -12,32 +12,25 @@
 # Both models are FP8: half the memory of BF16, so more of the GPU holds the KV cache and more requests run
 # at once. Both are multimodal; --language-model-only skips the vision tower, since the inputs are text.
 #
-# The runtime has no CUDA compiler (nvcc), so kernels that vLLM would compile on first use are avoided:
-# --linear-backend cutlass takes vLLM's prebuilt CUTLASS FP8 matmuls instead of DeepGEMM or FlashInfer
-# (plyserve also sets VLLM_USE_DEEP_GEMM=0 and VLLM_USE_FLASHINFER_SAMPLER=0 for every model).
+# Kernels are left to vLLM: with a CUDA toolkit loaded (slurm/site.sh) it picks DeepGEMM and FlashInfer, which it
+# compiles on first use. On RCI that prefilled ~2.7x faster than the prebuilt fallbacks (--linear-backend cutlass,
+# --gdn-prefill-backend triton) for Qwen, with answers at redraw-level agreement (docs/rci.md).
 
-# official FP8 checkpoint from Qwen (128x128 blocks); reasoning parser from the Qwen3.8 vLLM recipe.
-# Its linear-attention (GDN) layers would compile a FlashInfer prefill kernel; Triton needs no nvcc
+# official FP8 checkpoint from Qwen (128x128 blocks); reasoning parser from the Qwen3.8 vLLM recipe
 [models."qwen-3.8-27b-fp8"]
 repo = "Qwen/Qwen3.8-27B-FP8"
 revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
 tunnel_port = 18001
-args = [
-    "--reasoning-parser", "qwen3", "--language-model-only", "--max-model-len", "65536",
-    "--linear-backend", "cutlass", "--gdn-prefill-backend", "triton",
-]
+args = ["--reasoning-parser", "qwen3", "--language-model-only", "--max-model-len", "65536"]
 
 # Google publishes no FP8 checkpoint, so vLLM quantizes the official BF16 weights to FP8 when it loads them.
 # Alternatives: RedHatAI/gemma-4-31B-it-FP8-dynamic (third-party, with published recovery numbers) or Google's
-# 4-bit QAT google/gemma-4-31B-it-qat-w4a16-ct
+# 4-bit QAT google/gemma-4-31B-it-qat-w4a16-ct. Not yet served with vLLM's default kernels
 [models."gemma-4-31b-fp8"]
 repo = "google/gemma-4-31B-it"
 revision = "842da3794eaa0b77d5f08bae87a17459d91ff475"
 tunnel_port = 18002
-args = [
-    "--quantization", "fp8", "--reasoning-parser", "gemma4", "--language-model-only", "--max-model-len", "65536",
-    "--linear-backend", "cutlass",
-]
+args = ["--quantization", "fp8", "--reasoning-parser", "gemma4", "--language-model-only", "--max-model-len", "65536"]
 
 # The same Qwen3.8-27B served by Ollama, to compare the two engines on one model. GGUF from ggml-org (the llama.cpp project), converted from Qwen/Qwen3.8-27B.
 # Q8_0 is 8-bit like the FP8 checkpoint above but a different scheme (int8 blocks of 32 weights vs FP8 blocks of 128x128), so outputs can differ for that reason alone.

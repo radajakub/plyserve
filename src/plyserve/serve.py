@@ -36,9 +36,6 @@ TUNNEL_SETTLE = 10.0
 # seconds before reconnecting a dropped tunnel: the first delay, doubled after each failed attempt up to the second
 TUNNEL_RETRY = (1.0, 60.0)
 
-# the runtime has no CUDA compiler: DeepGEMM and FlashInfer's sampler compile kernels on first use and fail
-# without nvcc. The fallbacks are prebuilt (CUTLASS) or Triton. A variable set in .env or the shell wins
-RUNTIME_ENV = {"VLLM_USE_DEEP_GEMM": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
 # Ollama unloads a model 5 min after its last request; plyserve loads it once and keeps it until the server stops. Cloud features (remote models, web search) stay off.
 # Without pruning, a starting server never deletes a blob that a server in another job is still registering in the shared $PLYSERVE_HOME/ollama. A variable set in .env or the shell wins
 OLLAMA_ENV = {"OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NO_CLOUD": "1", "OLLAMA_NOPRUNE": "1"}
@@ -269,6 +266,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _version_line(argv: list[str], last: bool = False) -> str:
+    lines = subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip().splitlines()
+    return lines[-1] if last else lines[0]
+
+
+def toolchain(env: dict[str, str]) -> dict[str, str]:
+    # vLLM's fastest kernels (DeepGEMM, FlashInfer) are compiled on first use, so the server needs a CUDA toolkit and a
+    # C++ compiler (slurm/site.sh loads them, see docs/). Checked before the GPU loads anything; the versions go into
+    # the run record, since the kernels decide the numerics of the answers
+    path = env.get("PATH")
+    nvcc = shutil.which("nvcc", path=path)
+    if nvcc is None:
+        raise RuntimeError("vLLM needs a CUDA toolkit, but nvcc is not on PATH; load one in slurm/site.sh (see docs/setup.md)")
+    cxx = env.get("CXX") or shutil.which("c++", path=path)
+    if cxx is None:
+        raise RuntimeError("vLLM needs a C++ compiler, but CXX is unset and c++ is not on PATH; load one in slurm/site.sh (see docs/setup.md)")
+    return {"nvcc": nvcc, "nvcc_version": _version_line([nvcc, "--version"], last=True), "cxx": cxx, "cxx_version": _version_line([cxx, "--version"])}
+
+
 def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False, tunnel: bool = False) -> int:
     # starts vLLM or Ollama (spec.backend), waits until it answers, then runs `command` against it and stops the server when the command ends;
     # without a command it serves until the server exits. Returns the exit code of the command (or of the server).
@@ -306,9 +322,11 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
         details: dict[str, object] = {"file": spec.file, "ollama_env": {variable: server_env[variable] for variable in sorted(server_env) if variable.startswith("OLLAMA_")}}
     else:
         argv = [str(executable), *spec.vllm_args(bind, port)]
-        # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads
-        server_env = {**RUNTIME_ENV, **env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
-        details = {"vllm_args": argv[1:], "vllm_env": {variable: server_env[variable] for variable in RUNTIME_ENV}, "versions": _versions()}
+        # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads.
+        # The runtime's bin goes first on PATH: FlashInfer builds its kernels with the ninja installed there
+        path = os.pathsep.join(part for part in (str(executable.parent), env.get("PATH")) if part)
+        server_env = {**env, "PATH": path, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
+        details = {"vllm_args": argv[1:], "toolchain": toolchain(server_env), "versions": _versions()}
     record = {
         "model": spec.name,
         "repo": spec.repo,

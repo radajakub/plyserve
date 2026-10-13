@@ -29,7 +29,7 @@ args = sys.argv[1:]
 port = int(args[args.index("--port") + 1])
 key = os.environ["VLLM_API_KEY"]
 with open(os.environ["FAKE_RECORD"], "w") as record:
-    json.dump({"argv": args, "pid": os.getpid(), "key": key, "offline": os.environ.get("HF_HUB_OFFLINE"), "hf_home": os.environ.get("HF_HOME"), "deep_gemm": os.environ.get("VLLM_USE_DEEP_GEMM")}, record)
+    json.dump({"argv": args, "pid": os.getpid(), "key": key, "offline": os.environ.get("HF_HUB_OFFLINE"), "hf_home": os.environ.get("HF_HOME"), "path": os.environ.get("PATH")}, record)
 if "FAKE_EXIT" in os.environ:
     sys.exit(int(os.environ["FAKE_EXIT"]))
 ready_at = time.monotonic() + float(os.environ.get("FAKE_HEALTH_DELAY", "0"))
@@ -53,6 +53,16 @@ if "FAKE_LIFETIME" in os.environ:
 server.serve_forever()
 """
 
+# stand in for a CUDA toolkit and a C++ compiler: each prints a version banner
+_FAKE_NVCC = "#!/bin/sh\necho 'nvcc: NVIDIA (R) Cuda compiler driver'\necho 'Build cuda_12.9.r12.9/compiler.0'\n"
+_FAKE_CXX = "#!/bin/sh\necho 'c++ (GCC) 13.3.0'\n"
+
+
+def _executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o755)
+
+
 # a client that checks the server with the variables it was given, records them and exits with code 3
 _CLIENT = """
 import json, os, sys, urllib.request
@@ -74,6 +84,13 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     vllm.chmod(0o755)
     (venv / "bin" / "python").symlink_to(sys.executable)
     monkeypatch.setattr(settings, "RUNTIME", venv)
+
+    tools = tmp_path / "toolchain"
+    tools.mkdir()
+    _executable(tools / "nvcc", _FAKE_NVCC)
+    _executable(tools / "c++", _FAKE_CXX)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tools), os.environ["PATH"]]))
+    monkeypatch.delenv("CXX", raising=False)
 
     home = tmp_path / "home"
     (home / "hf" / "hub" / "models--org--model" / "snapshots" / "abc123").mkdir(parents=True)
@@ -113,7 +130,7 @@ def test_client_runs_against_the_server_and_its_code_is_returned(fake: Path) -> 
     assert vllm["key"] not in vllm["argv"]
     assert vllm["offline"] == "1"
     assert vllm["hf_home"] == str(fake / "home" / "hf")
-    assert vllm["deep_gemm"] == "0"
+    assert vllm["path"].split(os.pathsep)[0] == str(fake / "venv" / "bin")  # FlashInfer's JIT finds the runtime's ninja
     assert _gone(vllm["pid"])
 
 
@@ -126,7 +143,12 @@ def test_run_record(fake: Path) -> None:
     assert record["model"] == "m-fp8" and record["repo"] == "org/model" and record["revision"] == "abc123"
     assert record["vllm_args"] == vllm["argv"]
     assert record["command"] == [sys.executable, "-c", "pass"]
-    assert record["vllm_env"] == {"VLLM_USE_DEEP_GEMM": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+    assert record["toolchain"] == {
+        "nvcc": str(fake / "toolchain" / "nvcc"),
+        "nvcc_version": "Build cuda_12.9.r12.9/compiler.0",
+        "cxx": str(fake / "toolchain" / "c++"),
+        "cxx_version": "c++ (GCC) 13.3.0",
+    }
     assert set(record["versions"]) == {"vllm", "torch", "transformers"}
     assert {"started_at", "ready_at", "plyserve", "gpus", "hostname"} <= set(record)
     assert vllm["key"] not in record_file.read_text()
@@ -139,11 +161,23 @@ def test_run_directory_is_named_after_the_slurm_job(fake: Path, monkeypatch: pyt
     assert record["slurm_job_id"] == "4242"
 
 
-def test_shell_can_turn_a_runtime_default_back_on(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # e.g. once a CUDA toolkit is available
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+@pytest.mark.parametrize(("tool", "message"), [("nvcc", "needs a CUDA toolkit"), ("c++", r"needs a C\+\+ compiler")])
+def test_missing_toolchain_stops_before_vllm_starts(fake: Path, monkeypatch: pytest.MonkeyPatch, tool: str, message: str) -> None:
+    (fake / "toolchain" / tool).unlink()
+    # only the stand-ins, so a system compiler (e.g. /usr/bin/c++) does not fill the gap
+    monkeypatch.setenv("PATH", str(fake / "toolchain"))
+    with pytest.raises(RuntimeError, match=message):
+        serve(_SPEC, command=[sys.executable, "-c", "pass"])
+    assert not (fake / "vllm.json").exists()
+
+
+def test_cxx_names_the_compiler(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (fake / "toolchain" / "c++").unlink()
+    _executable(fake / "g++13", _FAKE_CXX)
+    monkeypatch.setenv("CXX", str(fake / "g++13"))
     serve(_SPEC, command=[sys.executable, "-c", "pass"])
-    assert json.loads((fake / "vllm.json").read_text())["deep_gemm"] == "1"
+    [record_file] = (fake / "home" / "runs").glob("*-m-fp8/server.json")
+    assert json.loads(record_file.read_text())["toolchain"]["cxx"] == str(fake / "g++13")
 
 
 def test_waits_for_health(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:

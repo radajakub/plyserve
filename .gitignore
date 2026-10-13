@@ -227,3 +227,6 @@ runtime/ollama/
 
 # site settings for the Makefile (partitions); see docs/
 local.mk
+
+# site toolchain sourced by slurm/serve.sbatch (CUDA toolkit, compiler); see docs/
+slurm/site.sh

@@ -5,7 +5,7 @@ the same job, in another job on the cluster, or on another machine through an SS
 
 plyserve starts and watches vLLM or Ollama; it never imports them. The models, their pinned revisions and their
 flags live in `models.toml`; the vLLM environment is pinned in `runtime/vllm/`, the Ollama release in the `Makefile`. Cluster-specific values live in
-`.env` and `local.mk`, never in the code. Tested on CTU RCI; it should work on any Slurm cluster that meets the
+`.env`, `local.mk` and `slurm/site.sh`, never in the code. Tested on CTU RCI; it should work on any Slurm cluster that meets the
 requirements below. Full setup guide: [docs/setup.md](docs/setup.md); values for RCI: [docs/rci.md](docs/rci.md).
 
 ## Requirements
@@ -16,8 +16,10 @@ requirements below. Full setup guide: [docs/setup.md](docs/setup.md); values for
 - Internet (PyPI, GitHub, huggingface.co) on the node that runs the setup. Compute nodes need none: servers start offline.
 - Slurm with GPUs as a GRES, for `slurm/serve.sbatch` and the `make` shells.
 - Mode 2: compute nodes reach each other over TCP. Mode 3: compute nodes may open SSH connections to the client machine.
+- For vLLM: a CUDA toolkit matching the runtime (12.9) and a C++20 compiler (GCC >= 10) on the serving nodes. vLLM
+  compiles its fastest kernels (DeepGEMM, FlashInfer) with them on first use.
 
-No root, containers, CUDA toolkit or environment modules are needed. [docs/setup.md](docs/setup.md) shows how to check
+No root, containers or internet on the compute nodes are needed. [docs/setup.md](docs/setup.md) shows how to check
 each requirement.
 
 ## Setup
@@ -29,6 +31,14 @@ make runtime                             # the pinned vLLM environment, ~10 GB i
 uv run plyserve models                   # the models in models.toml
 make download MODEL=qwen-3.8-27b-fp8     # weights at the pinned revision into $PLYSERVE_HOME/hf
 make runtime-ollama                      # optional, for Ollama models: the pinned release (1.4 GB download) in runtime/ollama
+```
+
+A `slurm/site.sh` (gitignored) that puts the CUDA toolkit and the compiler on `PATH`; `slurm/serve.sbatch`
+sources it, and an interactive shell needs `source slurm/site.sh` before `plyserve serve`. On a cluster with
+environment modules, for example:
+
+```bash
+module load CUDA/12.9.1 GCC/13.3.0
 ```
 
 Optional: a `local.mk` with your cluster's partitions for the interactive `make cpu`, `make gpu` and
@@ -165,6 +175,7 @@ Comparing Ollama with vLLM on "the same" model, these differ unless set on purpo
 
 - vLLM applies each model's `generation_config.json` sampling defaults (for Qwen3.8: temperature 1.0,
   top_k 20, top_p 0.95). Clients that need reproducible outputs should send `temperature` and `seed`.
-- The runtime has no CUDA compiler, so plyserve and `models.toml` steer vLLM to prebuilt kernels
-  (CUTLASS, Triton); see the comments in `models.toml` and `RUNTIME_ENV` in `src/plyserve/serve.py`.
+- vLLM picks its kernels itself and compiles some on first use, so a first start takes a few minutes longer.
+  `serve` stops before loading the model if `nvcc` or a C++ compiler is missing, and records both versions in
+  `server.json`: the kernels decide the numerics of the answers.
 - Development: `make test`, `make lint`, `make format`.

@@ -18,10 +18,10 @@ Check each row before the setup. "Needed for" says which part fails without it.
 | Slurm with GPUs as a GRES (`--gres=gpu:1`) | `slurm/serve.sbatch`, `make gpu` | `sinfo -o "%P %G"` lists the GPU partitions and their GRES |
 | Compute nodes reach each other over TCP on any unprivileged port | mode 2 (`--expose`) | `nc -l 18080` in one job, `nc -z <its host> 18080` from another |
 | Outbound SSH from compute nodes to the client machine | mode 3 (`--tunnel`) | from a job: `ssh <client machine> true` |
+| A CUDA toolkit matching the runtime (12.9) and a C++20 compiler (GCC >= 10) on the serving nodes | vLLM | after loading them: `nvcc --version` (12.9), `c++ --version`; e.g. `module avail CUDA GCC` |
 
-Not needed: root, containers (Apptainer, Docker), a CUDA toolkit or compiler on the nodes, environment modules,
-internet on the compute nodes (servers start offline from the shared weights), or Slurm for `plyserve serve`
-itself (outside a job, run records are named by the start time).
+Not needed: root, containers (Apptainer, Docker), internet on the compute nodes (servers start offline from the
+shared weights), or Slurm for `plyserve serve` itself (outside a job, run records are named by the start time).
 
 Some sites need more on every job: an account (`-A`), a QOS (`-q`), or `--gpus=1` instead of `--gres=gpu:1`.
 Pass them to `sbatch` and `srun` on the command line or through `SBATCH_*` variables (e.g. `SBATCH_ACCOUNT`).
@@ -80,6 +80,15 @@ internet access. Below, `<shared>` is your folder on the shared storage.
    SERVE_PARTITION = <the partition with the GPU you serve on>
    ```
 
+   In `slurm/site.sh`, the commands that put the CUDA toolkit and the compiler on `PATH`. `slurm/serve.sbatch`
+   sources it before `plyserve serve`; `serve` stops with a message if `nvcc` or `c++` (or `$CXX`) is missing. With
+   environment modules:
+
+   ```bash
+   module purge
+   module load <CUDA 12.9 module> <GCC module>
+   ```
+
 4. **Runtime and weights:**
 
    ```bash
@@ -103,6 +112,7 @@ internet access. Below, `<shared>` is your folder on the shared storage.
 ```bash
 make gpu-serve
 # on the node:
+source slurm/site.sh && nvcc --version | tail -1 && c++ --version | head -1
 nvidia-smi
 runtime/vllm/.venv/bin/python -c "import torch, vllm; print(vllm.__version__, torch.version.cuda, torch.cuda.get_device_name())"
 uv run plyserve serve qwen-3.8-27b-fp8 -- bash -c 'curl -s -H "Authorization: Bearer $VLLM_API_KEY" "$VLLM_BASE_URL/models"'
@@ -113,8 +123,9 @@ Expected:
 - the vLLM version, `12.9` and your GPU's name;
 - then the vLLM log, `plyserve: qwen-3.8-27b-fp8 is ready at ...`, and the model list.
 
-The first start takes a few minutes (torch.compile, warmup, CUDA graphs). Later starts reuse the compile cache in
-`~/.cache/vllm` and are faster.
+The first start takes a few minutes (torch.compile, kernel compilation, warmup, CUDA graphs). Later starts reuse
+the caches in `~/.cache` and are faster. In the vLLM log, `Selected FlashInferFp8DeepGEMM...` and `Using FlashInfer
+GDN prefill kernel` (Qwen) show the fast kernels; `server.json` records the toolchain.
 
 For Ollama:
 
@@ -203,11 +214,11 @@ curl -s -H "Authorization: Bearer <PLYSERVE_API_KEY>" http://127.0.0.1:18001/v1/
   find . -name '*.so*' -type f | while read -r f; do ldd "$f" 2>/dev/null | grep -q '\.so\.13 => not found' && echo "$f"; done
   ```
 
-- **No CUDA compiler.** The runtime has no nvcc. Kernels that vLLM compiles at first use (DeepGEMM, FlashInfer)
-  would fail with `NVCC compiler is not executable`. plyserve and `models.toml` avoid them (see the comments in
-  `models.toml`). A new model may need the same flags.
-- **Caches in home.** vLLM's torch.compile cache goes to `~/.cache/vllm` (~31 MB per model). Ollama creates
-  `~/.ollama/id_ed25519` and prints its public key; this is harmless.
+- **Kernel compilation.** vLLM compiles DeepGEMM and FlashInfer kernels on first use. Without a toolkit it fails
+  with `NVCC compiler is not executable`, and GCC 8.5 (the EL8 system compiler) is too old for them. FlashInfer
+  calls `ninja`, which plyserve finds in the runtime (`runtime/vllm/.venv/bin`, put first on `PATH`).
+- **Caches in home.** vLLM's torch.compile cache goes to `~/.cache/vllm` (~31 MB per model), and the compiled
+  kernels to `~/.cache` as well. Ollama creates `~/.ollama/id_ed25519` and prints its public key; this is harmless.
 - **No `python` on the nodes.** On some clusters a client command `python ...` fails with "the client command
   'python' was not found". Use `uv run --project <client> python ...` or a full path.
 
