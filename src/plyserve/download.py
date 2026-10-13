@@ -7,8 +7,8 @@ from plyserve.settings import environment, hf_home, runtime_executable
 
 
 def download_command(spec: ModelSpec) -> list[str]:
-    # the hf CLI of the vLLM environment, so the cache layout is the one that vLLM reads
-    return [str(runtime_executable("hf")), "download", spec.repo, "--revision", spec.revision]
+    # the hf CLI of the vLLM environment, so the cache layout is the one that vLLM reads; for Ollama only the one GGUF file
+    return [str(runtime_executable("hf")), "download", spec.repo, *([spec.file] if spec.file else []), "--revision", spec.revision]
 
 
 def download(spec: ModelSpec) -> None:

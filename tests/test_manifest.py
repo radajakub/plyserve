@@ -78,3 +78,35 @@ def test_shared_tunnel_port_is_refused(tmp_path: Path) -> None:
 def test_unknown_top_level_key_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown top-level keys"):
         load_manifest(_write(tmp_path, '[model."m"]\nrepo = "x"\n'))
+
+
+_OLLAMA_ENTRY = f'backend = "ollama"\n{_ENTRY}file = "model-Q8_0.gguf"\n'
+
+
+def test_ollama_entry_renders_a_modelfile(tmp_path: Path) -> None:
+    path = _write(tmp_path, f'[models."m-q8"]\n{_OLLAMA_ENTRY}parameters = {{ num_ctx = 4096, top_p = 0.95, stop = ["<|im_end|>", "a b"] }}\n')
+    spec = load_manifest(path)["m-q8"]
+    assert (spec.backend, spec.file, spec.args) == ("ollama", "model-Q8_0.gguf", ())
+    assert spec.modelfile(Path("/hf/snap")) == 'FROM /hf/snap/model-Q8_0.gguf\nPARAMETER num_ctx 4096\nPARAMETER top_p 0.95\nPARAMETER stop "<|im_end|>"\nPARAMETER stop "a b"\n'
+
+
+def test_backend_defaults_to_vllm(tmp_path: Path) -> None:
+    spec = load_manifest(_write(tmp_path, f'[models."m"]\n{_ENTRY}'))["m"]
+    assert spec.backend == "vllm" and spec.file is None and spec.parameters == ()
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ('backend = "llamacpp"\n' + _ENTRY, "backend must be one of"),
+        ('backend = "ollama"\n' + _ENTRY, r"missing \['file'\]"),
+        (_OLLAMA_ENTRY + 'args = ["--max-model-len", "4096"]\n', r"unknown keys \['args'\] for backend ollama"),
+        (_ENTRY + 'file = "model.gguf"\n', r"unknown keys \['file'\] for backend vllm"),
+        ('backend = "ollama"\n' + _ENTRY + 'file = "model.safetensors"\n', "must name a .gguf file"),
+        (_OLLAMA_ENTRY + "parameters = { num_ctx = true }\n", "parameter num_ctx must be"),
+        (_OLLAMA_ENTRY + 'parameters = "num_ctx 4096"\n', "parameters must be a table"),
+    ],
+)
+def test_invalid_ollama_entries_are_refused(tmp_path: Path, entry: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_manifest(_write(tmp_path, f'[models."m"]\n{entry}'))

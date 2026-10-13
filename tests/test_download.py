@@ -34,6 +34,14 @@ def test_download_fills_the_plyserve_cache(tmp_path: Path, runtime: Path, monkey
     assert (tmp_path / "home" / "hf").is_dir()
 
 
+def test_ollama_model_downloads_only_its_gguf(tmp_path: Path, runtime: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLYSERVE_HOME", str(tmp_path / "home"))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+    download(ModelSpec("m-q8", "org/model-gguf", "abc123", 18003, (), "ollama", "model-Q8_0.gguf"))
+    assert calls == [[str(runtime / "bin" / "hf"), "download", "org/model-gguf", "model-Q8_0.gguf", "--revision", "abc123"]]
+
+
 def test_plyserve_home_is_required(runtime: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PLYSERVE_HOME", raising=False)
     with pytest.raises(RuntimeError, match="PLYSERVE_HOME is not set"):

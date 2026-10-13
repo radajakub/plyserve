@@ -1,4 +1,4 @@
-.PHONY: test lint format fix runtime download cpu gpu gpu-serve
+.PHONY: test lint format fix runtime runtime-ollama download cpu gpu gpu-serve
 
 test:
 	uv run --group dev pytest -q
@@ -18,7 +18,19 @@ fix: format
 runtime:
 	uv sync --project runtime/vllm
 
-# Weights at the pinned revision into $PLYSERVE_HOME/hf: make download MODEL=qwen-3.8-27b-fp8
+# The pinned Ollama release (runtime/ollama, with its own CUDA libraries), checked against the release's SHA-256. Linux x86_64 only: run it on RCI.
+# The archive is zstd-compressed; Python 3.14's tarfile unpacks it, so the node needs no zstd. To upgrade: change both values, delete runtime/ollama, rerun
+OLLAMA_VERSION = 0.40.3
+OLLAMA_SHA256 = ce6f8b671a699bf1ebafb28d60dbbabf4f37b30b499145fa308a8ba72de021d6
+runtime-ollama:
+	mkdir -p runtime/ollama
+	curl -fL -o runtime/ollama/ollama.tar.zst https://github.com/ollama/ollama/releases/download/v$(OLLAMA_VERSION)/ollama-linux-amd64.tar.zst
+	echo "$(OLLAMA_SHA256)  runtime/ollama/ollama.tar.zst" | sha256sum -c -
+	uv run --no-project --python 3.14 python -m tarfile -e runtime/ollama/ollama.tar.zst runtime/ollama
+	rm runtime/ollama/ollama.tar.zst
+	runtime/ollama/bin/ollama --version
+
+# Weights at the pinned revision into $PLYSERVE_HOME/hf: make download MODEL=qwen-3.8-27b-fp8 (also for Ollama models: it needs `make runtime` for the hf CLI)
 download:
 	@test -n "$(MODEL)" || (echo "usage: make download MODEL=<served name>  (uv run plyserve models lists them)" >&2; exit 1)
 	uv run plyserve download $(MODEL)

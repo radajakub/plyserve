@@ -411,3 +411,168 @@ def test_cli_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
         main(["serve", "--tunnel", "m-fp8"])
     assert calls[0]["tunnel"] is True and calls[0]["expose"] is False
+
+
+_OLLAMA_SPEC = ModelSpec("m-q8", "org/model-gguf", "def456", 18003, (), "ollama", "model-Q8_0.gguf", (("num_ctx", 4096),))
+
+# stands in for the Ollama release: `create` records its Modelfile; `serve` answers Ollama's API without a key on OLLAMA_HOST and records its environment.
+# FAKE_VRAM is how many of the model's 100 bytes end up on the GPU
+_FAKE_OLLAMA = """
+import http.server, json, os, sys
+
+record = os.environ["FAKE_RECORD"]
+if sys.argv[1] == "create":
+    with open(record + ".create", "w") as handle:
+        json.dump({"argv": sys.argv[2:], "modelfile": open(sys.argv[sys.argv.index("-f") + 1]).read(), "host": os.environ["OLLAMA_HOST"]}, handle)
+    # a spinner with terminal control codes, as the real CLI writes it, then FAKE_CREATE_EXIT
+    sys.stderr.write("\\x1b[?25l\\x1b[1Ggathering model components \\u280b \\x1b[K\\r\\x1b[1Ggathering model components \\u2819 \\x1b[K\\n")
+    if "FAKE_CREATE_EXIT" in os.environ:
+        sys.stderr.write("Error: invalid file magic\\n")
+    sys.exit(int(os.environ.get("FAKE_CREATE_EXIT", "0")))
+assert sys.argv[1:] == ["serve"]
+with open(record, "w") as handle:
+    json.dump({"pid": os.getpid(), "env": {name: value for name, value in os.environ.items() if name.startswith("OLLAMA_")}}, handle)
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/version":
+            self._send({"version": "0.40.3"})
+        elif self.path == "/api/ps":
+            self._send({"models": [{"name": "m-q8:latest", "model": "m-q8:latest", "size": 100, "size_vram": int(os.environ.get("FAKE_VRAM", "100"))}]})
+        elif self.path == "/v1/models":
+            self._send({"object": "list", "data": [{"id": "m-q8:latest"}], "authorization": self.headers.get("Authorization")})
+        else:
+            self._send({}, 404)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/api/generate":
+            with open(record + ".load", "w") as handle:
+                json.dump(body, handle)
+            self._send({"model": body["model"], "done": True, "done_reason": "load"})
+        elif self.path == "/api/show":
+            self._send({"modelfile": "FROM /blobs/sha256-x", "renderer": "qwen3", "details": {"format": "gguf"}})
+        else:
+            self._send({}, 404)
+
+    def _send(self, payload, status=200):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+host, port = os.environ["OLLAMA_HOST"].rsplit(":", 1)
+http.server.HTTPServer((host, int(port)), Handler).serve_forever()
+"""
+
+# a client that calls /v1/models with the key it was given and without one, and records both answers
+_KEY_CLIENT = """
+import json, os, sys, urllib.error, urllib.request
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def call(headers):
+    try:
+        response = opener.open(urllib.request.Request(os.environ["VLLM_BASE_URL"] + "/models", headers=headers))
+        return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, None
+with_key, without_key = call({"Authorization": "Bearer " + os.environ["VLLM_API_KEY"]}), call({})
+json.dump({"with_key": with_key, "without_key": without_key[0], "VLLM_MODEL": os.environ["VLLM_MODEL"]}, open(sys.argv[1], "w"))
+"""
+
+
+@pytest.fixture
+def fake_ollama(fake: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    runtime = fake / "ollama-runtime"
+    (runtime / "bin").mkdir(parents=True)
+    ollama = runtime / "bin" / "ollama"
+    ollama.write_text(f"#!{sys.executable}\n{textwrap.dedent(_FAKE_OLLAMA)}")
+    ollama.chmod(0o755)
+    monkeypatch.setattr(settings, "OLLAMA_RUNTIME", runtime)
+    snapshot = fake / "home" / "hf" / "hub" / "models--org--model-gguf" / "snapshots" / "def456"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model-Q8_0.gguf").write_bytes(b"GGUF")
+    for name in ("OLLAMA_KEEP_ALIVE", "OLLAMA_HOST", "OLLAMA_MODELS", "OLLAMA_NUM_PARALLEL", "FAKE_CREATE_EXIT"):
+        monkeypatch.delenv(name, raising=False)
+    return snapshot
+
+
+def test_ollama_serves_behind_the_key_proxy(fake: Path, fake_ollama: Path) -> None:
+    out = fake / "client.json"
+    assert serve(_OLLAMA_SPEC, command=[sys.executable, "-c", _KEY_CLIENT, str(out)]) == 0
+
+    client, ollama = json.loads(out.read_text()), json.loads((fake / "vllm.json").read_text())
+    status, models = client["with_key"]
+    assert status == 200 and models["authorization"] is None  # the key stops at the proxy
+    assert client["without_key"] == 401 and client["VLLM_MODEL"] == "m-q8"
+    host = ollama["env"]["OLLAMA_HOST"]
+    assert host.startswith("127.0.0.1:")  # Ollama itself is reachable only on the loopback address
+    assert ollama["env"]["OLLAMA_MODELS"] == str(fake / "home" / "ollama")
+    assert ollama["env"]["OLLAMA_KEEP_ALIVE"] == "-1" and ollama["env"]["OLLAMA_NOPRUNE"] == "1"
+    created = json.loads((fake / "vllm.json.create").read_text())
+    assert created["argv"][0] == "m-q8" and created["host"] == host
+    assert created["modelfile"] == f"FROM {fake_ollama / 'model-Q8_0.gguf'}\nPARAMETER num_ctx 4096\n"
+    assert json.loads((fake / "vllm.json.load").read_text()) == {"model": "m-q8", "keep_alive": -1, "stream": False}
+    assert _gone(ollama["pid"])
+
+    [record_file] = (fake / "home" / "runs").glob("*-m-q8/server.json")
+    record = json.loads(record_file.read_text())
+    assert record["backend"] == "ollama" and record["file"] == "model-Q8_0.gguf" and record["versions"] == {"ollama": "0.40.3"}
+    assert record["ollama_model"]["renderer"] == "qwen3" and record["memory"] == {"size": 100, "size_vram": 100}
+    assert record["ollama_env"]["OLLAMA_HOST"] == host and "vllm_args" not in record
+
+
+def test_ollama_reachable_from_another_job_through_the_endpoint(fake: Path, fake_ollama: Path) -> None:
+    out, manifest = fake / "client.json", fake / "models.toml"
+    manifest.write_text('[models."m-q8"]\nbackend = "ollama"\nrepo = "org/model-gguf"\nrevision = "def456"\nfile = "model-Q8_0.gguf"\ntunnel_port = 18003\n')
+    client_py = fake / "client.py"
+    client_py.write_text(_KEY_CLIENT)
+    src = Path(__file__).resolve().parents[1] / "src"
+    script = f'eval "$(PYTHONPATH={src} {sys.executable} -m plyserve --manifest {manifest} endpoint m-q8)" && {sys.executable} {client_py} {out}'
+
+    assert serve(_OLLAMA_SPEC, expose=True, command=["bash", "-c", script]) == 0
+
+    client = json.loads(out.read_text())
+    assert client["with_key"][0] == 200 and client["without_key"] == 401
+    assert not endpoint_path("m-q8").exists()
+
+
+@pytest.mark.parametrize(("vram", "message"), [("60", "only 0.0 of 0.0 GiB of m-q8 on the GPU"), ("0", "found no usable GPU")])
+def test_ollama_not_fully_on_the_gpu_stops(fake: Path, fake_ollama: Path, monkeypatch: pytest.MonkeyPatch, vram: str, message: str) -> None:
+    monkeypatch.setenv("FAKE_VRAM", vram)
+    with pytest.raises(RuntimeError, match=message):
+        serve(_OLLAMA_SPEC, command=[sys.executable, "-c", "pass"])
+    assert _gone(json.loads((fake / "vllm.json").read_text())["pid"])
+    assert not (fake / "home" / "runs").exists()
+
+
+def test_ollama_missing_gguf_says_how_to_fetch_it(fake: Path, fake_ollama: Path) -> None:
+    (fake_ollama / "model-Q8_0.gguf").unlink()
+    with pytest.raises(FileNotFoundError, match="model-Q8_0.gguf does not exist; fetch the weights with `make download MODEL=m-q8`"):
+        serve(_OLLAMA_SPEC)
+
+
+def test_ollama_missing_runtime_says_how_to_unpack_it(fake: Path, fake_ollama: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "OLLAMA_RUNTIME", fake / "missing")
+    with pytest.raises(FileNotFoundError, match="make runtime-ollama"):
+        serve(_OLLAMA_SPEC)
+
+
+def test_ollama_create_output_only_when_it_fails(fake: Path, fake_ollama: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
+    serve(_OLLAMA_SPEC, command=[sys.executable, "-c", "pass"])
+    assert "gathering model components" not in capfd.readouterr().out
+    monkeypatch.setenv("FAKE_CREATE_EXIT", "1")
+    with pytest.raises(RuntimeError, match="`ollama create` exited with code 1"):
+        serve(_OLLAMA_SPEC, command=[sys.executable, "-c", "pass"])
+    out = capfd.readouterr().out
+    assert "Error: invalid file magic" in out and "\x1b" not in out
+    assert _gone(json.loads((fake / "vllm.json").read_text())["pid"])
+
+
+def test_missing_client_command_is_named(fake: Path) -> None:
+    with pytest.raises(RuntimeError, match="the client command 'no-such-client' was not found"):
+        serve(_SPEC, command=["no-such-client", "x"])
+    assert _gone(json.loads((fake / "vllm.json").read_text())["pid"])

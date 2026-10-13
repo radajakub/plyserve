@@ -5,6 +5,9 @@
 # tunnel_port     VPS port a --tunnel opens for this model; unique, so two servers can tunnel at once
 # args            further `vllm serve` flags. plyserve sets the model, revision, served name, host, port
 #                 and API key itself, so those are refused here
+# backend         "vllm" (default) or "ollama". An Ollama model takes, instead of args:
+#   file          the GGUF file in the repository; `plyserve download` fetches only that file
+#   parameters    Modelfile PARAMETER values (num_ctx, temperature, stop = [...], ...)
 
 # Both models are FP8: half the memory of BF16, so more of the GPU holds the KV cache and more requests run
 # at once. Both are multimodal; --language-model-only skips the vision tower, since the inputs are text.
@@ -35,3 +38,15 @@ args = [
     "--quantization", "fp8", "--reasoning-parser", "gemma4", "--language-model-only", "--max-model-len", "65536",
     "--linear-backend", "cutlass",
 ]
+
+# The same Qwen3.8-27B served by Ollama, to compare the two engines on one model. GGUF from ggml-org (the llama.cpp project), converted from Qwen/Qwen3.8-27B.
+# Q8_0 is 8-bit like the FP8 checkpoint above but a different scheme (int8 blocks of 32 weights vs FP8 blocks of 128x128), so outputs can differ for that reason alone.
+# num_ctx matches --max-model-len above (Ollama's own default depends on the VRAM). The sampling values are those of Qwen's generation_config.json, which vLLM
+# applies and Ollama does not read. Ollama's OpenAI API (/v1) replaces temperature and top_p with 1.0 when a request leaves them out, so clients should send them
+[models."qwen-3.8-27b-q8"]
+backend = "ollama"
+repo = "ggml-org/Qwen3.8-27B-GGUF"
+revision = "71bc7b627595dc8a91039addd9c791ae548d6747"
+file = "Qwen3.8-27B-Q8_0.gguf"
+tunnel_port = 18003
+parameters = { num_ctx = 65536, temperature = 1.0, top_k = 20, top_p = 0.95 }

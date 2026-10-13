@@ -1,10 +1,10 @@
 # plyserve
 
-Serve open-weight models with [vLLM](https://docs.vllm.ai) in Slurm jobs, for OpenAI-compatible clients in
+Serve open-weight models with [vLLM](https://docs.vllm.ai) or [Ollama](https://ollama.com) in Slurm jobs, for OpenAI-compatible clients in
 the same job, in another job on the cluster, or on another machine through an SSH tunnel.
 
-plyserve starts and watches vLLM; it never imports it. The models, their pinned revisions and their vLLM flags
-live in `models.toml`; the vLLM environment is pinned in `runtime/vllm/`. Cluster-specific values live in
+plyserve starts and watches vLLM or Ollama; it never imports them. The models, their pinned revisions and their
+flags live in `models.toml`; the vLLM environment is pinned in `runtime/vllm/`, the Ollama release in the `Makefile`. Cluster-specific values live in
 `.env` and `local.mk`, never in the code. Setup on a known cluster: [docs/rci.md](docs/rci.md) (CTU RCI).
 
 ## Requirements
@@ -21,6 +21,7 @@ cp .env.example .env && chmod 600 .env   # set PLYSERVE_HOME, see the comments i
 make runtime                             # the pinned vLLM environment, ~10 GB in runtime/vllm/.venv
 uv run plyserve models                   # the models in models.toml
 make download MODEL=qwen-3.8-27b-fp8     # weights at the pinned revision into $PLYSERVE_HOME/hf
+make runtime-ollama                      # optional, for Ollama models: the pinned release (1.4 GB download) in runtime/ollama
 ```
 
 Optional: a `local.mk` with your cluster's partitions for the interactive `make cpu`, `make gpu` and
@@ -115,6 +116,43 @@ Anyone on the client machine can reach `127.0.0.1:<tunnel_port>`, so the API key
 Without a client command, `serve` runs until vLLM exits or the job ends. Every run writes `server.json` to
 `$PLYSERVE_HOME/runs/<job id>-<model>/`: model, revision, vLLM arguments and environment, package versions,
 plyserve commit, host and GPUs. It never contains the key.
+
+## Ollama
+
+A model with `backend = "ollama"` in `models.toml` runs on Ollama instead of vLLM. Everything above works the
+same: `serve`, the three modes, `slurm/serve.sbatch`, `endpoint` and the `VLLM_*` variables of the client.
+
+```bash
+make download MODEL=qwen-3.8-27b-q8      # only the GGUF file named in models.toml
+sbatch -p <partition> slurm/serve.sbatch qwen-3.8-27b-q8 -- python classify.py
+```
+
+- **Weights.** One GGUF file from a Hugging Face repository at a pinned revision. At start, `ollama create`
+  registers it under the served name in `$PLYSERVE_HOME/ollama`, with the `parameters` from `models.toml` as
+  the Modelfile. The first start copies the file there (the disk use doubles); later starts only hash it.
+- **API key.** Ollama has none. It listens on 127.0.0.1 only, and plyserve puts a small proxy in front that
+  checks the key and forwards every request (`/v1` and Ollama's own `/api`). The proxy's `/health` answers
+  for clients and endpoint files, as vLLM's does.
+- **GPU only.** Ollama puts on the CPU what does not fit on the GPU. `serve` then stops with a message, so a
+  run never goes on many times slower. Lower `num_ctx` or take a smaller GGUF.
+- **Throughput.** Ollama serves one request at a time unless `OLLAMA_NUM_PARALLEL` says otherwise (see
+  `.env.example`); vLLM batches many.
+- **Run record.** `server.json` holds the Ollama version, its `OLLAMA_*` variables, the Modelfile as Ollama
+  resolved it (with the chat template, or the built-in renderer and parser) and the bytes on the GPU.
+
+Comparing Ollama with vLLM on "the same" model, these differ unless set on purpose:
+
+- **Quantization.** A GGUF (e.g. Q8_0) is not the FP8 checkpoint vLLM serves; for the closest match use
+  the BF16 checkpoint and GGUF on both.
+- **Sampling.** vLLM applies the model's `generation_config.json`; Ollama does not read it. Ollama's `/v1`
+  sets `temperature` and `top_p` to 1.0 when a request leaves them out, whatever the Modelfile says. Send
+  `temperature`, `top_p` and `seed` in every request; `top_k` comes from `parameters` in `models.toml`.
+- **Chat template.** vLLM renders the Jinja template of the Hugging Face repository with Python's Jinja;
+  Ollama 0.40.3 hands the GGUF's own template to llama.cpp's Jinja engine (log: `selected=gguf_chat_template`).
+  For `qwen-3.8-27b-q8` the GGUF template is byte-identical to Qwen's (checked 2026-10-13). Its variables
+  (`enable_thinking`, `reasoning_effort`, default `xhigh`) still depend on what each server passes; the
+  `usage.prompt_tokens` of one request sent to both servers shows whether the prompts match.
+- **Context length.** Ollama's default context depends on the VRAM; set `num_ctx` to vLLM's `--max-model-len`.
 
 ## Notes
 

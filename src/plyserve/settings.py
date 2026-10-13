@@ -7,6 +7,8 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[2]
 # the pinned vLLM environment, built by `make runtime` (uv sync --project runtime/vllm)
 RUNTIME = REPOSITORY / "runtime" / "vllm" / ".venv"
+# the pinned Ollama release, unpacked by `make runtime-ollama`
+OLLAMA_RUNTIME = REPOSITORY / "runtime" / "ollama"
 # this clone's settings (gitignored; see .env.example), so a Slurm job finds them without a shell profile
 ENV_FILE = REPOSITORY / ".env"
 
@@ -56,4 +58,11 @@ def runtime_executable(name: str) -> Path:
     path = RUNTIME / "bin" / name
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist; build the vLLM environment with `make runtime`")
+    return path
+
+
+def ollama_executable() -> Path:
+    path = OLLAMA_RUNTIME / "bin" / "ollama"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist; unpack the Ollama release with `make runtime-ollama`")
     return path

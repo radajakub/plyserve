@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -15,7 +18,8 @@ from types import FrameType
 
 from plyserve.endpoint import Endpoint, endpoint_path, healthy, read_endpoint, remove_endpoint, write_endpoint
 from plyserve.manifest import ModelSpec
-from plyserve.settings import REPOSITORY, environment, hf_home, home, runtime_executable
+from plyserve.proxy import KeyProxy
+from plyserve.settings import REPOSITORY, environment, hf_home, home, ollama_executable, runtime_executable
 
 # without --expose the server is reachable only from processes in the same job
 HOST = "127.0.0.1"
@@ -35,6 +39,9 @@ TUNNEL_RETRY = (1.0, 60.0)
 # the runtime has no CUDA compiler: DeepGEMM and FlashInfer's sampler compile kernels on first use and fail
 # without nvcc. The fallbacks are prebuilt (CUTLASS) or Triton. A variable set in .env or the shell wins
 RUNTIME_ENV = {"VLLM_USE_DEEP_GEMM": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+# Ollama unloads a model 5 min after its last request; plyserve loads it once and keeps it until the server stops. Cloud features (remote models, web search) stay off.
+# Without pruning, a starting server never deletes a blob that a server in another job is still registering in the shared $PLYSERVE_HOME/ollama. A variable set in .env or the shell wins
+OLLAMA_ENV = {"OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NO_CLOUD": "1", "OLLAMA_NOPRUNE": "1"}
 
 # versions of the runtime's packages, read without importing vLLM (which takes seconds)
 _VERSIONS_SCRIPT = """
@@ -149,19 +156,73 @@ class _Tunnel:
         _stop(self.process, group=True)
 
 
-def _wait_until_ready(process: subprocess.Popen[bytes], url: str, key: str, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
+def _wait_until_ready(process: subprocess.Popen[bytes], engine: str, url: str, key: str, timeout: float, deadline: float) -> None:
     while not healthy(url, key):
         code = process.poll()
         if code is not None:
-            raise RuntimeError(f"vLLM exited with code {code} before it was ready; its log is above")
+            raise RuntimeError(f"{engine} exited with code {code} before it was ready; its log is above")
         if time.monotonic() > deadline:
-            raise RuntimeError(f"vLLM was not ready after {timeout:g} s; if it is only loading slowly, raise --timeout")
+            raise RuntimeError(f"{engine} was not ready after {timeout:g} s; if it is only loading slowly, raise --timeout")
         time.sleep(POLL_INTERVAL)
 
 
+def _ollama_api(upstream: str, path: str, payload: dict[str, object] | None = None, timeout: float = 30.0) -> dict:
+    # a call to Ollama's own API on the loopback address; http.client, unlike urllib, never goes through http_proxy
+    connection = http.client.HTTPConnection(upstream, timeout=max(timeout, 1.0))
+    try:
+        connection.request("GET" if payload is None else "POST", path, body=None if payload is None else json.dumps(payload), headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = response.read()
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise RuntimeError(f"Ollama answered {path} with {response.status}: {body.decode(errors='replace')[:500]}")
+    return json.loads(body)
+
+
+def _load_ollama(spec: ModelSpec, executable: Path, env: dict[str, str], upstream: str, weights: Path, timeout: float, deadline: float) -> dict[str, object]:
+    # registers the GGUF under the served name, loads it and checks that all of it is on the GPU; returns what the run record keeps
+    with tempfile.TemporaryDirectory() as folder:
+        modelfile = Path(folder) / "Modelfile"
+        modelfile.write_text(spec.modelfile(weights), encoding="utf-8")
+        # the CLI hashes the GGUF and copies it into OLLAMA_MODELS, unless a blob with that hash is there already
+        print(f"plyserve: registering {spec.file} with Ollama; the first start copies it into {env['OLLAMA_MODELS']}", flush=True)
+        try:
+            # its progress spinner would fill the job log with terminal control codes, so its output is shown only when it fails
+            created = subprocess.run(
+                [str(executable), "create", spec.name, "-f", str(modelfile)],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=max(deadline - time.monotonic(), 1.0),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"Ollama was not ready after {timeout:g} s (still registering {spec.file}); raise --timeout") from error
+    if created.returncode != 0:
+        lines = [line.strip() for line in re.split(r"[\r\n]+", re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", created.stdout + created.stderr)) if line.strip()]
+        print("\n".join(lines[-10:]), flush=True)
+        raise RuntimeError(f"`ollama create` exited with code {created.returncode}; its last lines are above")
+    # a request without a prompt only loads the model
+    _ollama_api(upstream, "/api/generate", {"model": spec.name, "keep_alive": -1, "stream": False}, timeout=deadline - time.monotonic())
+    loaded = next((model for model in _ollama_api(upstream, "/api/ps")["models"] if model["name"] in (spec.name, f"{spec.name}:latest")), None)
+    if loaded is None:
+        raise RuntimeError(f"Ollama does not list {spec.name} as loaded after loading it; its log is above")
+    # Ollama puts what does not fit on the GPU on the CPU, which is many times slower; a run that needs the GPU stops instead
+    size, on_gpu = loaded["size"], loaded["size_vram"]
+    if on_gpu == 0:
+        raise RuntimeError(f"Ollama runs {spec.name} on the CPU: it found no usable GPU; its log above says why")
+    if on_gpu < size:
+        raise RuntimeError(f"Ollama put only {on_gpu / 2**30:.1f} of {size / 2**30:.1f} GiB of {spec.name} on the GPU; lower num_ctx in models.toml or take a smaller GGUF")
+    shown = _ollama_api(upstream, "/api/show", {"model": spec.name})
+    # how Ollama turns messages into the prompt and parses the answer: the resolved Modelfile (with its chat template), or a built-in renderer and parser
+    model = {field: shown.get(field) for field in ("modelfile", "renderer", "parser", "details")}
+    return {"versions": {"ollama": _ollama_api(upstream, "/api/version")["version"]}, "ollama_model": model, "memory": {"size": size, "size_vram": on_gpu}}
+
+
 def _stop(process: subprocess.Popen[bytes], group: bool) -> None:
-    # vLLM runs in its own process group, so its engine processes are stopped with it
+    # the server runs in its own process group, so its engine processes (vLLM) or model runners (Ollama) are stopped with it
     def send(signum: int) -> None:
         try:
             if group:
@@ -209,13 +270,16 @@ def _now() -> str:
 
 
 def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False, tunnel: bool = False) -> int:
-    # starts vLLM, waits until it answers, then runs `command` against it and stops vLLM when the command ends;
-    # without a command it serves until vLLM exits. Returns the exit code of the command (or of vLLM).
+    # starts vLLM or Ollama (spec.backend), waits until it answers, then runs `command` against it and stops the server when the command ends;
+    # without a command it serves until the server exits. Returns the exit code of the command (or of the server).
     # `expose` makes the server reachable from other nodes and publishes it in an endpoint file;
     # `tunnel` forwards the model's tunnel_port on another machine to it over SSH
-    executable, weights = runtime_executable("vllm"), snapshot(spec)
-    if not weights.is_dir():
-        raise FileNotFoundError(f"{weights} does not exist; fetch the weights with `make download MODEL={spec.name}`")
+    ollama = spec.backend == "ollama"
+    engine, weights = "Ollama" if ollama else "vLLM", snapshot(spec)
+    required = weights / spec.file if spec.file else weights
+    if not required.exists():
+        raise FileNotFoundError(f"{required} does not exist; fetch the weights with `make download MODEL={spec.name}`")
+    executable = ollama_executable() if ollama else runtime_executable("vllm")
     env = environment()
     bind, host = addresses(env, expose)
     if expose and (current := read_endpoint(spec.name)) is not None and healthy(current.health_url, current.api_key):
@@ -228,21 +292,28 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     port = port or free_port(bind)
     # a fixed key from .env lets clients outside the cluster keep theirs; otherwise a new one for every run
     key = env.get("PLYSERVE_API_KEY") or secrets.token_urlsafe(32)
-    argv = [str(executable), *spec.vllm_args(bind, port)]
     # this job (and the tunnel) reaches the server on the loopback address whatever it listens on (IPv4 only)
     local_host = HOST if bind == EXPOSE_BIND else bind
     local = f"http://{local_host}:{port}"
     ssh_argv = tunnel_argv(env, spec.tunnel_port, f"{local_host}:{port}") if tunnel else None
     base_url = f"http://{host}:{port}/v1"
-    # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads
-    server_env = {**RUNTIME_ENV, **env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
+    if ollama:
+        # Ollama has no API key: it listens on the loopback address only, and plyserve's proxy on bind:port checks the key in front of it
+        upstream = f"{HOST}:{free_port(HOST)}"
+        argv = [str(executable), "serve"]
+        server_env = {**OLLAMA_ENV, **env, "OLLAMA_HOST": upstream, "OLLAMA_MODELS": str(home() / "ollama")}
+        details: dict[str, object] = {"file": spec.file, "ollama_env": {variable: server_env[variable] for variable in sorted(server_env) if variable.startswith("OLLAMA_")}}
+    else:
+        argv = [str(executable), *spec.vllm_args(bind, port)]
+        # the key goes through the environment so that `ps` does not show it; offline, so a job never downloads
+        server_env = {**RUNTIME_ENV, **env, "HF_HOME": str(hf_home()), "HF_HUB_OFFLINE": "1", "VLLM_API_KEY": key}
+        details = {"vllm_args": argv[1:], "vllm_env": {variable: server_env[variable] for variable in RUNTIME_ENV}, "versions": _versions()}
     record = {
         "model": spec.name,
         "repo": spec.repo,
         "revision": spec.revision,
-        "vllm_args": argv[1:],
-        "vllm_env": {name: server_env[name] for name in RUNTIME_ENV},
-        "versions": _versions(),
+        "backend": spec.backend,
+        **details,
         "plyserve": {"commit": _git("rev-parse", "HEAD"), "dirty": bool(_git("status", "--porcelain"))},
         "base_url": base_url,
         "exposed": expose,
@@ -256,10 +327,15 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     }
 
     previous = {name: signal.signal(name, _on_signal) for name in (signal.SIGTERM, signal.SIGINT)}
-    vllm, published, forward = None, None, None
+    server, proxy, published, forward = None, None, None, None
     try:
-        vllm = subprocess.Popen(argv, env=server_env, start_new_session=True)
-        _wait_until_ready(vllm, f"{local}/health", key, timeout)
+        deadline = time.monotonic() + timeout
+        server = subprocess.Popen(argv, env=server_env, start_new_session=True)
+        if ollama:
+            _wait_until_ready(server, engine, f"http://{upstream}/api/version", key, timeout, deadline)
+            record.update(_load_ollama(spec, executable, server_env, upstream, weights, timeout, deadline))
+            proxy = KeyProxy((bind, port), upstream, key, "/api/version")
+        _wait_until_ready(server, engine, f"{local}/health", key, timeout, deadline)
         record["ready_at"] = _now()
         run_dir = home() / "runs" / f"{env.get('SLURM_JOB_ID') or datetime.now().strftime('%Y%m%d-%H%M%S')}-{spec.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -274,13 +350,16 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
             forward.wait_until_up()
             print(f"plyserve: tunnel open, {ssh_argv[-1]} forwards {ssh_argv[3].rsplit(':', 2)[0]} to this server", flush=True)
 
-        client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name)) if command else None
+        try:
+            client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name)) if command else None
+        except FileNotFoundError as error:
+            raise RuntimeError(f"the client command {command[0]!r} was not found; give a full path, or e.g. `uv run python ...` where the node has no `python`") from error
         try:
             while client is None or (code := client.poll()) is None:
-                if (server_code := vllm.poll()) is not None:
+                if (server_code := server.poll()) is not None:
                     if client is None:
                         return server_code
-                    raise RuntimeError(f"vLLM exited with code {server_code} while the client was running; its log is above")
+                    raise RuntimeError(f"{engine} exited with code {server_code} while the client was running; its log is above")
                 if forward is not None:
                     forward.check()
                 time.sleep(POLL_INTERVAL)
@@ -297,7 +376,9 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
             forward.stop()
         if published is not None:
             remove_endpoint(published)
-        if vllm is not None:
-            _stop(vllm, group=True)
+        if proxy is not None:
+            proxy.stop()
+        if server is not None:
+            _stop(server, group=True)
         for name, handler in previous.items():
             signal.signal(name, handler)

@@ -18,7 +18,7 @@ def _model(args: argparse.Namespace) -> ModelSpec:
 
 def _models(args: argparse.Namespace) -> None:
     for spec in load_manifest(args.manifest).values():
-        print(f"{spec.name}\t{spec.repo}@{spec.revision[:12]}\ttunnel {spec.tunnel_port}")
+        print(f"{spec.name}\t{spec.backend}\t{spec.repo}@{spec.revision[:12]}\ttunnel {spec.tunnel_port}")
 
 
 def _download(args: argparse.Namespace) -> None:
@@ -54,13 +54,13 @@ def main(argv: list[str] | None = None) -> None:
     serve_parser.add_argument(
         "--tunnel", action="store_true", help="forward the model's tunnel_port on another machine to the server over SSH (see PLYSERVE_TUNNEL_* in .env.example)"
     )
-    serve_parser.add_argument("--port", type=int, help="port for vLLM (default: a free one)")
-    serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for vLLM to load (default: 1800)")
+    serve_parser.add_argument("--port", type=int, help="port for the server (default: a free one)")
+    serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for the model to load (default: 1800)")
     serve_parser.add_argument(
         "client",
         nargs="*",
         metavar="command",
-        help="after --: the client to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set; vLLM stops when it exits. Without it, serve until the job ends",
+        help="after --: the client to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set; the server stops when it exits. Without it, serve until the job ends",
     )
     serve_parser.set_defaults(run=_serve)
 

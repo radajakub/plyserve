@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,8 @@ DEFAULT_MANIFEST = REPOSITORY / "models.toml"
 # flags plyserve sets from the served name and the run; a manifest that set them too would contradict it
 RESERVED_FLAGS = frozenset({"--model", "--revision", "--tokenizer", "--tokenizer-revision", "--served-model-name", "--host", "--port", "--api-key"})
 _REQUIRED_KEYS = {"repo", "revision", "tunnel_port"}
-_KEYS = _REQUIRED_KEYS | {"args"}
+# keys of each backend beyond the common ones: vLLM takes command-line flags; Ollama takes one GGUF file of the repository and Modelfile parameters
+_BACKEND_KEYS = {"vllm": {"args"}, "ollama": {"file", "parameters"}}
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,9 @@ class ModelSpec:
     revision: str
     tunnel_port: int
     args: tuple[str, ...]
+    backend: str = "vllm"
+    file: str | None = None  # Ollama: the GGUF file in the repository
+    parameters: tuple[tuple[str, str | int | float], ...] = ()  # Ollama: Modelfile PARAMETER lines; a name repeats for a list (e.g. stop)
 
     def vllm_args(self, host: str, port: int) -> list[str]:
         # the arguments after the `vllm` executable. The tokenizer is pinned too: vLLM loads it separately,
@@ -40,6 +45,12 @@ class ModelSpec:
             str(port),
             *self.args,
         ]
+
+    def modelfile(self, snapshot: Path) -> str:
+        # the Ollama Modelfile that registers the downloaded GGUF under the served name; strings are quoted, so a stop sequence may hold spaces
+        lines = [f"FROM {snapshot / self.file}"] if self.file else []
+        lines += [f"PARAMETER {name} {json.dumps(value) if isinstance(value, str) else value}" for name, value in self.parameters]
+        return "\n".join(lines) + "\n"
 
 
 def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, ModelSpec]:
@@ -62,12 +73,16 @@ def _spec(path: Path, name: str, entry: object) -> ModelSpec:
     where = f"{path}: model {name}"
     if not isinstance(entry, dict):
         raise ValueError(f"{where} must be a table")
-    missing = _REQUIRED_KEYS - set(entry)
+    backend = entry.get("backend", "vllm")
+    if backend not in _BACKEND_KEYS:
+        raise ValueError(f"{where}: backend must be one of {sorted(_BACKEND_KEYS)}")
+    required = _REQUIRED_KEYS | ({"file"} if backend == "ollama" else set())
+    missing = required - set(entry)
     if missing:
         raise ValueError(f"{where} is missing {sorted(missing)}")
-    unknown = set(entry) - _KEYS
+    unknown = set(entry) - _REQUIRED_KEYS - {"backend"} - _BACKEND_KEYS[backend]
     if unknown:
-        raise ValueError(f"{where} has unknown keys {sorted(unknown)}")
+        raise ValueError(f"{where} has unknown keys {sorted(unknown)} for backend {backend}")
 
     repo, revision, tunnel_port, args = entry["repo"], entry["revision"], entry["tunnel_port"], entry.get("args", [])
     if not isinstance(repo, str) or not repo:
@@ -82,4 +97,19 @@ def _spec(path: Path, name: str, entry: object) -> ModelSpec:
     reserved = sorted({arg.split("=", 1)[0] for arg in args} & RESERVED_FLAGS)
     if reserved:
         raise ValueError(f"{where}: args set {reserved}, which plyserve sets itself")
-    return ModelSpec(name, repo, revision, tunnel_port, tuple(args))
+    if backend == "vllm":
+        return ModelSpec(name, repo, revision, tunnel_port, tuple(args))
+
+    file, parameters = entry["file"], entry.get("parameters", {})
+    if not isinstance(file, str) or not file.endswith(".gguf"):
+        raise ValueError(f"{where}: file must name a .gguf file in the repository")
+    if not isinstance(parameters, dict):
+        raise ValueError(f"{where}: parameters must be a table")
+    pairs: list[tuple[str, str | int | float]] = []
+    for key, value in parameters.items():
+        for item in value if isinstance(value, list) else [value]:
+            # bool is an int subclass, and Ollama's parameters take numbers and strings
+            if isinstance(item, bool) or not isinstance(item, str | int | float):
+                raise ValueError(f"{where}: parameter {key} must be a number, a string or a list of them")
+            pairs.append((key, item))
+    return ModelSpec(name, repo, revision, tunnel_port, (), backend, file, tuple(pairs))

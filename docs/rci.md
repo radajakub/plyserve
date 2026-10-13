@@ -68,6 +68,13 @@ The values below were checked on 2026-10-11; recheck them if something fails.
    make download MODEL=gemma-4-31b-fp8       # ~62 GB (BF16 weights, quantized to FP8 at load)
    ```
 
+   For Ollama models, also (it downloads ~1.4 GB, and uv fetches Python 3.14 once to unpack it):
+
+   ```bash
+   make runtime-ollama
+   make download MODEL=qwen-3.8-27b-q8       # ~29 GB, one GGUF file
+   ```
+
 ## Check on a GPU node
 
 ```bash
@@ -82,6 +89,15 @@ the model list. On 2026-10-11 Qwen3.8-27B-FP8 took ~2 min 10 s from start to rea
 36 s, warmup 44 s, CUDA graphs ~12 s), used 27.6 GiB for weights and left 95 GiB for the KV cache
 (~1.45 M tokens). Later starts reuse the torch.compile cache in `~/.cache/vllm`: on 2026-10-12 the same
 model was ready in ~45 s.
+
+For Ollama, on the same kind of node (the first start also copies the GGUF into `$PLYSERVE_HOME/ollama`):
+
+```bash
+uv run plyserve serve qwen-3.8-27b-q8 -- bash -c 'curl -s -H "Authorization: Bearer $VLLM_API_KEY" "$VLLM_BASE_URL/models"'
+```
+
+Expected: Ollama's log with the CUDA library it picked and the H200, `plyserve: qwen-3.8-27b-q8 is ready at ...`
+and the model list. `memory` in `server.json` should show `size_vram` equal to `size`.
 
 Do not run `serve` or `vllm serve --help` on the login node: it has no GPU, and vLLM fails to detect a device.
 
@@ -163,3 +179,11 @@ curl -s -H "Authorization: Bearer <PLYSERVE_API_KEY>" http://127.0.0.1:18001/v1/
   `127.0.0.1:18001` with the fixed key. `--expose --tunnel` in one job then served a client job and the VPS at
   the same time (job 11785372); the tunnel did not drop, and `scancel` stopped it.
 - **Not yet checked:** reconnecting after a real drop, and RCI's policy on long-lived listeners and tunnels.
+- **Ollama checked** on 2026-10-13 (job 11789085, H200): Ollama 0.40.3 picked its bundled `cuda_v12` libraries
+  with driver 575 (CUDA 12.9) and put all 65 layers of `qwen-3.8-27b-q8` on the GPU (~30 GiB with a 64k context).
+  Ready ~61 s after start: hashing the GGUF ~15 s, copying it into `$PLYSERVE_HOME/ollama` ~25 s (first start only),
+  loading 11 s. Ollama runs llama.cpp's `llama-server` and renders prompts with the GGUF's own chat template.
+  Harmless messages: Ollama creates `~/.ollama/id_ed25519` and prints its public key; "GPU discovery watchdog
+  timed out" only means it kept the free-memory figures from its start.
+- **No `python` on the nodes.** A client command `python ...` fails with "the client command 'python' was not
+  found"; use `uv run --project <client> python ...` or a full path.
