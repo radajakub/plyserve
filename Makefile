@@ -14,11 +14,11 @@ format:
 # Alias for format
 fix: format
 
-# The pinned vLLM environment (runtime/vllm/.venv, ~10 GB). Linux x86_64 only: run it on RCI
+# The pinned vLLM environment (runtime/vllm/.venv, ~10 GB). Linux x86_64 only: run it on the cluster
 runtime:
 	uv sync --project runtime/vllm
 
-# The pinned Ollama release (runtime/ollama, with its own CUDA libraries), checked against the release's SHA-256. Linux x86_64 only: run it on RCI.
+# The pinned Ollama release (runtime/ollama, with its own CUDA libraries), checked against the release's SHA-256. Linux x86_64 only: run it on the cluster.
 # The archive is zstd-compressed; Python 3.14's tarfile unpacks it, so the node needs no zstd. To upgrade: change both values, delete runtime/ollama, rerun
 OLLAMA_VERSION = 0.40.3
 OLLAMA_SHA256 = ce6f8b671a699bf1ebafb28d60dbbabf4f37b30b499145fa308a8ba72de021d6

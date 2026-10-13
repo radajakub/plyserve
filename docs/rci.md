@@ -1,7 +1,7 @@
 # plyserve on CTU RCI
 
-How to set up and run plyserve on the CTU RCI cluster (`login2.rci.cvut.cz`).
-The values below were checked on 2026-10-11; recheck them if something fails.
+The values and results for the CTU RCI cluster (`login2.rci.cvut.cz`). Follow [setup.md](setup.md) with the
+values below. They were checked on 2026-10-11; recheck them if something fails.
 
 ## What RCI has
 
@@ -14,176 +14,58 @@ The values below were checked on 2026-10-11; recheck them if something fails.
 | Partitions | `cpufast`, `gpufast` (V100), `amdgpufast` (A100), `h200fast`, `h200`, `h200long`, `h200extralong` |
 | Containers | no Apptainer or Singularity, hence the uv environment in `runtime/vllm` |
 | Network | compute nodes reach huggingface.co; jobs reach each other by host name (e.g. `n01`) |
+| `~/.ssh` | the same on the login and compute nodes |
+| `python` | none on the nodes: use `uv run --project <client> python ...` in client commands |
 
-## One-time setup
+## Values for the setup
 
-1. **uv and its cache.** Install uv in `~/.local/bin` and keep its cache on `/mnt/personal`: the runtime is
-   ~10 GB, and a cache on the same file system lets uv hardlink instead of copying.
-
-   ```bash
-   echo 'export UV_CACHE_DIR=/mnt/personal/$USER/uv-cache' >> ~/.bashrc
-   ```
-
-   An SSH login reads `~/.bash_profile`, not `~/.bashrc`. If there is no `~/.bash_profile` (and no
-   `~/.profile`), create one that reads `~/.bashrc`, then log in again and check `uv cache dir`:
-
-   ```bash
-   echo '[ -f ~/.bashrc ] && . ~/.bashrc' > ~/.bash_profile
-   ```
-
-2. **No conda base.** An active conda environment puts its own libraries first and breaks the runtime:
-
-   ```bash
-   conda config --set auto_activate_base false
-   ```
-
-3. **Clone and configure.**
-
-   ```bash
-   cd /mnt/personal/$USER && git clone <plyserve remote> && cd plyserve
-   cp .env.example .env && chmod 600 .env
-   ```
-
-   In `.env`:
-
-   ```bash
-   PLYSERVE_HOME=/mnt/personal/$USER/plyserve-home
-   HF_XET_HIGH_PERFORMANCE=1
-   ```
-
-   and in `local.mk` (for `make cpu`, `make gpu`, `make gpu-serve`; the `*fast` partitions have the shortest
-   queues):
-
-   ```make
-   CPU_PARTITION = cpufast
-   GPU_PARTITION = gpufast
-   SERVE_PARTITION = h200fast
-   ```
-
-4. **Runtime and weights**, on the login node:
-
-   ```bash
-   make runtime
-   make download MODEL=qwen-3.8-27b-fp8      # ~29 GB
-   make download MODEL=gemma-4-31b-fp8       # ~62 GB (BF16 weights, quantized to FP8 at load)
-   ```
-
-   For Ollama models, also (it downloads ~1.4 GB, and uv fetches Python 3.14 once to unpack it):
-
-   ```bash
-   make runtime-ollama
-   make download MODEL=qwen-3.8-27b-q8       # ~29 GB, one GGUF file
-   ```
-
-## Check on a GPU node
+`<shared>` is `/mnt/personal/$USER`:
 
 ```bash
-make gpu-serve
-# on the node:
-runtime/vllm/.venv/bin/python -c "import torch, vllm; print(vllm.__version__, torch.version.cuda, torch.cuda.get_device_name())"
-uv run plyserve serve qwen-3.8-27b-fp8 -- bash -c 'curl -s -H "Authorization: Bearer $VLLM_API_KEY" "$VLLM_BASE_URL/models"'
-```
-
-Expected: `0.31.0 12.9 NVIDIA H200 NVL`, then the vLLM log, `plyserve: qwen-3.8-27b-fp8 is ready at ...` and
-the model list. On 2026-10-11 Qwen3.8-27B-FP8 took ~2 min 10 s from start to ready (weights 3 s, torch.compile
-36 s, warmup 44 s, CUDA graphs ~12 s), used 27.6 GiB for weights and left 95 GiB for the KV cache
-(~1.45 M tokens). Later starts reuse the torch.compile cache in `~/.cache/vllm`: on 2026-10-12 the same
-model was ready in ~45 s.
-
-For Ollama, on the same kind of node (the first start also copies the GGUF into `$PLYSERVE_HOME/ollama`):
-
-```bash
-uv run plyserve serve qwen-3.8-27b-q8 -- bash -c 'curl -s -H "Authorization: Bearer $VLLM_API_KEY" "$VLLM_BASE_URL/models"'
-```
-
-Expected: Ollama's log with the CUDA library it picked and the H200, `plyserve: qwen-3.8-27b-q8 is ready at ...`
-and the model list. `memory` in `server.json` should show `size_vram` equal to `size`.
-
-Do not run `serve` or `vllm serve --help` on the login node: it has no GPU, and vLLM fails to detect a device.
-
-## Running
-
-Batch jobs need the partition on the command line (or `export SBATCH_PARTITION=h200fast`):
-
-```bash
-# mode 1: server and client in one job
-sbatch -p h200fast slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
-
-# mode 2: server in one job, clients in others
-sbatch -p h200fast slurm/serve.sbatch --expose qwen-3.8-27b-fp8
-# in each client job (any partition):
-eval "$(/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait qwen-3.8-27b-fp8)"
-
-# mode 3: server in a job, client on your own machine (see "Tunnel" below)
-sbatch -p h200fast slurm/serve.sbatch --tunnel qwen-3.8-27b-fp8
-```
-
-`h200fast` is the short-queue partition; longer runs go to `h200`, `h200long` or `h200extralong` with a matching
-`-t`. Job logs go to `plyserve-<job id>.out` in the submit directory; run records to
-`$PLYSERVE_HOME/runs/<job id>-<model>/server.json`.
-
-## Tunnel (mode 3)
-
-The general setup is in the README. On RCI, `~/.ssh` is the same on the login and compute nodes, so the key and
-the saved host key are made once on the login node:
-
-```bash
-ssh-keygen -t ed25519 -N "" -C plyserve-tunnel -f ~/.ssh/plyserve_tunnel
-cat ~/.ssh/plyserve_tunnel.pub   # add it to the client machine's authorized_keys, limited as in the README
+echo 'export UV_CACHE_DIR=/mnt/personal/$USER/uv-cache' >> ~/.bashrc
+cd /mnt/personal/$USER && git clone <plyserve remote> && cd plyserve
 ```
 
 In `.env`:
 
 ```bash
-PLYSERVE_API_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(32))">
-PLYSERVE_TUNNEL_HOST=<user>@<client machine>
-PLYSERVE_TUNNEL_KEY=~/.ssh/plyserve_tunnel
+PLYSERVE_HOME=/mnt/personal/$USER/plyserve-home
+HF_XET_HIGH_PERFORMANCE=1
 ```
 
-Check, before the first GPU job, that a compute node reaches the client machine (it saves the host key; with
-`command="/bin/false"` it ends with exit code 1, which is expected):
+In `local.mk` (the `*fast` partitions have the shortest queues):
+
+```make
+CPU_PARTITION = cpufast
+GPU_PARTITION = gpufast
+SERVE_PARTITION = h200fast
+```
+
+Batch jobs need the partition on the command line (or `export SBATCH_PARTITION=h200fast`):
 
 ```bash
-make cpu
-# on the node:
-ssh -i ~/.ssh/plyserve_tunnel <user>@<client machine> true; echo "exit $?"
+sbatch -p h200fast slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
 ```
 
-Then a test (~3 min on `h200fast`; it ends when the client command ends):
+`h200fast` is the short-queue partition. Longer runs go to `h200`, `h200long` or `h200extralong` with a matching
+`-t`. In client jobs of mode 2, the endpoint command is
+`/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait <model>`.
 
-```bash
-make gpu-serve
-# on the node:
-uv run plyserve serve --tunnel qwen-3.8-27b-fp8 -- sleep 600
-# on the client machine, while it sleeps:
-curl -s -H "Authorization: Bearer <PLYSERVE_API_KEY>" http://127.0.0.1:18001/v1/models
-```
+## Results
 
-## Known issues
-
-- **CUDA 13 packages.** vLLM's default PyPI wheels need CUDA 13, newer than the 575 driver. `runtime/vllm`
-  pins the CUDA 12.9 builds; torchaudio comes from the cu129 index and torchcodec as the CPU build. After a
-  runtime upgrade, list libraries that still need CUDA 13 (the output should be empty):
-
-  ```bash
-  cd runtime/vllm/.venv/lib/python3.12/site-packages
-  find . -name '*.so*' -type f | while read -r f; do ldd "$f" 2>/dev/null | grep -q '\.so\.13 => not found' && echo "$f"; done
-  ```
-
-- **No CUDA compiler on the nodes.** Kernels that vLLM compiles at first use (DeepGEMM, FlashInfer) fail with
-  `NVCC compiler is not executable: /usr/local/cuda/bin/nvcc`. plyserve avoids them (see `models.toml`).
-- **Caches in home.** vLLM's torch.compile cache goes to `~/.cache/vllm` (~31 MB per model so far).
+- **vLLM checked** on 2026-10-11: the GPU-node check printed `0.31.0 12.9 NVIDIA H200 NVL`. Qwen3.8-27B-FP8 took
+  ~2 min 10 s from start to ready (weights 3 s, torch.compile 36 s, warmup 44 s, CUDA graphs ~12 s). It used
+  27.6 GiB for weights and left 95 GiB for the KV cache (~1.45 M tokens). On 2026-10-12, with the torch.compile
+  cache in `~/.cache/vllm`, the same model was ready in ~45 s.
 - **Mode 2 checked** on 2026-10-12: server job on `h02` (H200), client on `n06`; `scancel` stopped vLLM and
-  removed the endpoint file. Stop an `--expose` server with `scancel`, not by killing processes.
+  removed the endpoint file.
 - **Mode 3 checked** on 2026-10-12: `serve --tunnel` in an H200 job; `/v1/models` answered on the VPS at
   `127.0.0.1:18001` with the fixed key. `--expose --tunnel` in one job then served a client job and the VPS at
-  the same time (job 11785372); the tunnel did not drop, and `scancel` stopped it.
-- **Not yet checked:** reconnecting after a real drop, and RCI's policy on long-lived listeners and tunnels.
+  the same time (job 11785372); the tunnel did not drop, and `scancel` stopped it. The tunnel test took ~3 min
+  on `h200fast`.
 - **Ollama checked** on 2026-10-13 (job 11789085, H200): Ollama 0.40.3 picked its bundled `cuda_v12` libraries
   with driver 575 (CUDA 12.9) and put all 65 layers of `qwen-3.8-27b-q8` on the GPU (~30 GiB with a 64k context).
   Ready ~61 s after start: hashing the GGUF ~15 s, copying it into `$PLYSERVE_HOME/ollama` ~25 s (first start only),
   loading 11 s. Ollama runs llama.cpp's `llama-server` and renders prompts with the GGUF's own chat template.
-  Harmless messages: Ollama creates `~/.ollama/id_ed25519` and prints its public key; "GPU discovery watchdog
-  timed out" only means it kept the free-memory figures from its start.
-- **No `python` on the nodes.** A client command `python ...` fails with "the client command 'python' was not
-  found"; use `uv run --project <client> python ...` or a full path.
+  Harmless message: "GPU discovery watchdog timed out" only means it kept the free-memory figures from its start.
+- **Not yet checked:** reconnecting after a real drop, and RCI's policy on long-lived listeners and tunnels.

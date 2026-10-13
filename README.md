@@ -5,13 +5,20 @@ the same job, in another job on the cluster, or on another machine through an SS
 
 plyserve starts and watches vLLM or Ollama; it never imports them. The models, their pinned revisions and their
 flags live in `models.toml`; the vLLM environment is pinned in `runtime/vllm/`, the Ollama release in the `Makefile`. Cluster-specific values live in
-`.env` and `local.mk`, never in the code. Setup on a known cluster: [docs/rci.md](docs/rci.md) (CTU RCI).
+`.env` and `local.mk`, never in the code. Tested on CTU RCI; it should work on any Slurm cluster that meets the
+requirements below. Full setup guide: [docs/setup.md](docs/setup.md); values for RCI: [docs/rci.md](docs/rci.md).
 
 ## Requirements
 
 - Linux x86_64 with an NVIDIA GPU whose driver supports CUDA 12.9 (driver >= 575) and glibc >= 2.28.
 - [uv](https://docs.astral.sh/uv/) on the login node; it provides Python.
 - A folder on fast storage that every node mounts, for weights, run records and endpoint files.
+- Internet (PyPI, GitHub, huggingface.co) on the node that runs the setup. Compute nodes need none: servers start offline.
+- Slurm with GPUs as a GRES, for `slurm/serve.sbatch` and the `make` shells.
+- Mode 2: compute nodes reach each other over TCP. Mode 3: compute nodes may open SSH connections to the client machine.
+
+No root, containers, CUDA toolkit or environment modules are needed. [docs/setup.md](docs/setup.md) shows how to check
+each requirement.
 
 ## Setup
 
