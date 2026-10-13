@@ -28,7 +28,7 @@ def server() -> Iterator[str]:
             self.send_response(200 if self.path == "/health" and self.headers.get("Authorization") == "Bearer k" else 401)
             self.end_headers()
 
-        def log_message(self, *args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)

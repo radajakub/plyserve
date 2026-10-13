@@ -1,4 +1,4 @@
-.PHONY: test lint format fix runtime runtime-ollama download cpu gpu gpu-serve
+.PHONY: test lint typecheck check format fix runtime runtime-ollama download cpu gpu gpu-serve
 
 test:
 	uv run --group dev pytest -q
@@ -6,6 +6,13 @@ test:
 lint:
 	uv run --group dev ruff check .
 	uv run --group dev ruff format --check .
+	$(MAKE) typecheck
+
+typecheck:
+	uv run --group dev pyright
+
+# Lint, then the tests
+check: lint test
 
 format:
 	uv run ruff check --fix .

@@ -7,6 +7,7 @@ import textwrap
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -231,7 +232,7 @@ def healthy_server() -> Iterator[str]:
             self.send_response(200)
             self.end_headers()
 
-        def log_message(self, *args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
@@ -341,7 +342,7 @@ def fake_ssh(fake: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return fake / "ssh.jsonl"
 
 
-def _starts(record: Path) -> list[dict[str, object]]:
+def _starts(record: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in record.read_text().splitlines()]
 
 

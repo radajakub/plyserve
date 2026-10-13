@@ -297,6 +297,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     local = f"http://{local_host}:{port}"
     ssh_argv = tunnel_argv(env, spec.tunnel_port, f"{local_host}:{port}") if tunnel else None
     base_url = f"http://{host}:{port}/v1"
+    upstream = ""  # Ollama's own address, behind the proxy; vLLM has none
     if ollama:
         # Ollama has no API key: it listens on the loopback address only, and plyserve's proxy on bind:port checks the key in front of it
         upstream = f"{HOST}:{free_port(HOST)}"
