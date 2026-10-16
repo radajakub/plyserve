@@ -1,4 +1,4 @@
-.PHONY: test lint typecheck check format fix runtime runtime-ollama download cpu gpu gpu-serve
+.PHONY: test lint typecheck check format fix release release-dry-run require-version runtime runtime-ollama download cpu gpu gpu-serve
 
 test:
 	uv run --group dev pytest -q
@@ -20,6 +20,19 @@ format:
 
 # Alias for format
 fix: format
+
+# Fail before the slow checks run, so a missing VERSION costs nothing
+require-version:
+	@test -n "$(VERSION)" || (echo "usage: make $(MAKECMDGOALS) VERSION=0.2.0" >&2; exit 1)
+
+# Cut a release: make release VERSION=0.2.0
+# Bumps the version, tags it, and publishes a GitHub Release. Not uploaded to PyPI: plyserve runs from a clone
+release: require-version lint test
+	uv run python scripts/release.py $(VERSION)
+
+# Print every step of a release without changing anything
+release-dry-run: require-version
+	uv run python scripts/release.py $(VERSION) --dry-run
 
 # The pinned vLLM environment (runtime/vllm/.venv, ~10 GB). Linux x86_64 only: run it on the cluster
 runtime:
