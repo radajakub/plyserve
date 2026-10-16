@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
 ### Added
 
 - An Ollama model's client also gets `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` (same URL and key as `VLLM_*`), from

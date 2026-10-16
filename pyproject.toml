@@ -1,6 +1,6 @@
 [project]
 name = "plyserve"
-version = "0.1.0"
+version = "0.2.0"
 description = "Serve open-weight models with vLLM in Slurm jobs, for OpenAI-compatible clients on the same cluster or behind a tunnel."
 readme = "README.md"
 # tomllib; cluster system Pythons can be much older (e.g. 3.6), so uv provides the interpreter
