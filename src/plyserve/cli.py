@@ -32,7 +32,8 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _endpoint(args: argparse.Namespace) -> None:
-    print(shell_exports(find_endpoint(_model(args).name, wait=args.wait, timeout=args.timeout)))
+    spec = _model(args)
+    print(shell_exports(find_endpoint(spec.name, wait=args.wait, timeout=args.timeout), spec.backend))
 
 
 def main(argv: list[str] | None = None) -> None:

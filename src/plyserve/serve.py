@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
 
-from plyserve.endpoint import Endpoint, endpoint_path, healthy, read_endpoint, remove_endpoint, write_endpoint
+from plyserve.endpoint import Endpoint, client_variables, endpoint_path, healthy, read_endpoint, remove_endpoint, write_endpoint
 from plyserve.manifest import ModelSpec
 from plyserve.proxy import KeyProxy
 from plyserve.settings import REPOSITORY, environment, hf_home, home, ollama_executable, runtime_executable
@@ -88,7 +88,7 @@ def snapshot(spec: ModelSpec) -> Path:
     return hf_home() / "hub" / f"models--{spec.repo.replace('/', '--')}" / "snapshots" / spec.revision
 
 
-def client_environment(env: dict[str, str], base_url: str, key: str, model: str) -> dict[str, str]:
+def client_environment(env: dict[str, str], base_url: str, key: str, model: str, backend: str = "vllm") -> dict[str, str]:
     client = dict(env)
     # `uv run plyserve` puts plyserve's own .venv first on PATH; the client must not run in it
     venv = client.get("VIRTUAL_ENV")
@@ -99,7 +99,7 @@ def client_environment(env: dict[str, str], base_url: str, key: str, model: str)
     # an HTTP client would send 127.0.0.1 through a cluster proxy too
     for name in ("no_proxy", "NO_PROXY"):
         client[name] = ",".join(part for part in (client.get(name), "127.0.0.1", "localhost") if part)
-    client.update(VLLM_BASE_URL=base_url, VLLM_API_KEY=key, VLLM_MODEL=model)
+    client.update(client_variables(base_url, key, model, backend))
     return client
 
 
@@ -370,7 +370,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
             print(f"plyserve: tunnel open, {ssh_argv[-1]} forwards {ssh_argv[3].rsplit(':', 2)[0]} to this server", flush=True)
 
         try:
-            client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name)) if command else None
+            client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name, spec.backend)) if command else None
         except FileNotFoundError as error:
             raise RuntimeError(f"the client command {command[0]!r} was not found; give a full path, or e.g. `uv run python ...` where the node has no `python`") from error
         try:

@@ -94,9 +94,18 @@ def find_endpoint(model: str, *, wait: bool = False, timeout: float | None = Non
         time.sleep(interval)
 
 
-def shell_exports(endpoint: Endpoint) -> str:
+def client_variables(base_url: str, key: str, model: str, backend: str) -> dict[str, str]:
+    # what a client reads: VLLM_* for every backend; for Ollama also OLLAMA_*, which plyllm's ollama provider reads
+    # (its vllm provider has no entry for an Ollama model)
+    values = {"VLLM_BASE_URL": base_url, "VLLM_API_KEY": key, "VLLM_MODEL": model}
+    if backend == "ollama":
+        values |= {"OLLAMA_BASE_URL": base_url, "OLLAMA_API_KEY": key}
+    return values
+
+
+def shell_exports(endpoint: Endpoint, backend: str = "vllm") -> str:
     # for `eval "$(plyserve endpoint <model>)"`: the variables a client reads, and the server's host kept off any HTTP proxy
-    values = {"VLLM_BASE_URL": endpoint.base_url, "VLLM_API_KEY": endpoint.api_key, "VLLM_MODEL": endpoint.model}
+    values = client_variables(endpoint.base_url, endpoint.api_key, endpoint.model, backend)
     lines = [f"export {name}={shlex.quote(value)}" for name, value in values.items()]
     host = shlex.quote(urlsplit(endpoint.base_url).hostname or "")
     lines += [f'export {name}="${{{name}:+${name},}}"{host}' for name in ("no_proxy", "NO_PROXY")]

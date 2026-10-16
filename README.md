@@ -71,6 +71,11 @@ They come from `.env` in the clone or from the environment; the environment wins
 | `VLLM_BASE_URL` | OpenAI-compatible base URL, ending in `/v1` |
 | `VLLM_API_KEY` | Bearer token for every request |
 | `VLLM_MODEL` | The served name to send as `model`, the key in `models.toml` |
+| `OLLAMA_BASE_URL`, `OLLAMA_API_KEY` | Ollama models only: the same URL and key, for plyllm's `ollama` provider |
+
+In modes 1 and 2 plyserve hands these over at run time (with a new key each run unless `PLYSERVE_API_KEY` is set),
+so a client's `.env` needs none of them. Only a client in mode 3 sets them itself, from the tunnel port and the
+fixed key.
 
 ## Modes
 
@@ -106,6 +111,8 @@ and the client uses the fixed key:
 sbatch -p <partition> slurm/serve.sbatch --tunnel qwen-3.8-27b-fp8
 # on the client machine:
 export VLLM_BASE_URL=http://127.0.0.1:18001/v1 VLLM_API_KEY=<PLYSERVE_API_KEY> VLLM_MODEL=qwen-3.8-27b-fp8
+# for an Ollama model (plyllm's ollama provider), on its own tunnel_port:
+export OLLAMA_BASE_URL=http://127.0.0.1:18003/v1 OLLAMA_API_KEY=<PLYSERVE_API_KEY>
 ```
 
 If ssh fails in the first 10 s (host, key, unknown host key, port taken), `serve` stops with ssh's message above.
@@ -137,7 +144,8 @@ plyserve commit, host and GPUs. It never contains the key.
 ## Ollama
 
 A model with `backend = "ollama"` in `models.toml` runs on Ollama instead of vLLM. Everything above works the
-same: `serve`, the three modes, `slurm/serve.sbatch`, `endpoint` and the `VLLM_*` variables of the client.
+same: `serve`, the three modes, `slurm/serve.sbatch`, `endpoint` and the `VLLM_*` variables of the client, which
+also gets `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` for plyllm's `ollama` provider.
 
 ```bash
 make download MODEL=qwen-3.8-27b-q8      # only the GGUF file named in models.toml

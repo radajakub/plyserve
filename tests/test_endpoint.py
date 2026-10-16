@@ -103,6 +103,14 @@ def test_shell_exports_survive_eval() -> None:
     assert output == "http://node7:4242/v1|it's $secret|m-fp8|example.org,node7|node7|"
 
 
+def test_cli_prints_the_ollama_exports_for_an_ollama_model(server: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": ModelSpec("m-fp8", "org/model", "abc123", 18001, (), backend="ollama")})
+    write_endpoint(_endpoint(server))
+    main(["endpoint", "m-fp8"])
+    out = capsys.readouterr().out
+    assert f"export VLLM_BASE_URL={server}" in out and f"export OLLAMA_BASE_URL={server}" in out and "export OLLAMA_API_KEY=" in out
+
+
 def test_cli_prints_the_exports(server: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": ModelSpec("m-fp8", "org/model", "abc123", 18001, ())})
     write_endpoint(_endpoint(server))

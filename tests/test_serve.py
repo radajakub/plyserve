@@ -308,6 +308,14 @@ def test_client_leaves_plyserve_venv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client["no_proxy"] == "example.org,127.0.0.1,localhost" and client["NO_PROXY"] == "127.0.0.1,localhost"
 
 
+def test_an_ollama_client_also_gets_the_ollama_variables() -> None:
+    vllm = client_environment({}, "http://127.0.0.1:1/v1", "k", "m")
+    assert "OLLAMA_BASE_URL" not in vllm and "OLLAMA_API_KEY" not in vllm
+    ollama = client_environment({}, "http://127.0.0.1:1/v1", "k", "m", "ollama")
+    assert ollama["OLLAMA_BASE_URL"] == ollama["VLLM_BASE_URL"] == "http://127.0.0.1:1/v1"
+    assert ollama["OLLAMA_API_KEY"] == ollama["VLLM_API_KEY"] == "k"
+
+
 def test_client_keeps_its_own_venv() -> None:
     env = {"VIRTUAL_ENV": "/elsewhere/.venv", "PATH": "/elsewhere/.venv/bin:/usr/bin"}
     client = client_environment(env, "http://127.0.0.1:1/v1", "k", "m")

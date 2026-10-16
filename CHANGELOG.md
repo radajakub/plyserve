@@ -5,3 +5,8 @@ All notable changes to this project are documented in this file. The format is b
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+
+- An Ollama model's client also gets `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` (same URL and key as `VLLM_*`), from
+  `serve ... -- <client>` and from `plyserve endpoint`, for plyllm's `ollama` provider.
