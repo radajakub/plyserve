@@ -35,11 +35,12 @@ args = ["--quantization", "fp8", "--reasoning-parser", "gemma4", "--language-mod
 # The same Qwen3.8-27B served by Ollama, to compare the two engines on one model. GGUF from ggml-org (the llama.cpp project), converted from Qwen/Qwen3.8-27B.
 # Q8_0 is 8-bit like the FP8 checkpoint above but a different scheme (int8 blocks of 32 weights vs FP8 blocks of 128x128), so outputs can differ for that reason alone.
 # num_ctx matches --max-model-len above (Ollama's own default depends on the VRAM). The sampling values are those of Qwen's generation_config.json, which vLLM
-# applies and Ollama does not read. Ollama's OpenAI API (/v1) replaces temperature and top_p with 1.0 when a request leaves them out, so clients should send them
+# applies and Ollama does not read. Ollama's OpenAI API (/v1) replaces temperature and top_p with 1.0 when a request leaves them out, so clients should send them.
+# repeat_penalty 1.0 (off) is vLLM's default and Qwen's; Ollama's default was 1.1 in older releases and is 1.0 on main (api/types.go, 2026-10-16), so it is pinned here
 [models."qwen-3.8-27b-q8"]
 backend = "ollama"
 repo = "ggml-org/Qwen3.8-27B-GGUF"
 revision = "71bc7b627595dc8a91039addd9c791ae548d6747"
 file = "Qwen3.8-27B-Q8_0.gguf"
 tunnel_port = 18003
-parameters = { num_ctx = 65536, temperature = 1.0, top_k = 20, top_p = 0.95 }
+parameters = { num_ctx = 65536, temperature = 1.0, top_k = 20, top_p = 0.95, repeat_penalty = 1.0 }
