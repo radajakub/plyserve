@@ -14,7 +14,7 @@ requirements below. Full setup guide: [docs/setup.md](docs/setup.md); values for
 - [uv](https://docs.astral.sh/uv/) on the login node; it provides Python.
 - A folder on fast storage that every node mounts, for weights, run records and endpoint files.
 - Internet (PyPI, GitHub, huggingface.co) on the node that runs the setup. Compute nodes need none: servers start offline.
-- Slurm with GPUs as a GRES, for `slurm/serve.sbatch` and the `make` shells.
+- Slurm with GPUs as a GRES, for `slurm/serve_model.sbatch` and the `make` shells.
 - Mode 2: compute nodes reach each other over TCP. Mode 3: compute nodes may open SSH connections to the client machine.
 - For vLLM: a CUDA toolkit matching the runtime (12.9) and a C++20 compiler (GCC >= 10) on the serving nodes. vLLM
   compiles its fastest kernels (DeepGEMM, FlashInfer) with them on first use.
@@ -33,7 +33,7 @@ make download MODEL=qwen-3.8-27b-fp8     # weights at the pinned revision into $
 make runtime-ollama                      # optional, for Ollama models: the pinned release (1.4 GB download) in runtime/ollama
 ```
 
-A `slurm/site.sh` (gitignored) that puts the CUDA toolkit and the compiler on `PATH`; `slurm/serve.sbatch`
+A `slurm/site.sh` (gitignored) that puts the CUDA toolkit and the compiler on `PATH`; `slurm/serve_model.sbatch`
 sources it, and an interactive shell needs `source slurm/site.sh` before `plyserve serve`. On a cluster with
 environment modules, for example:
 
@@ -42,12 +42,13 @@ module load CUDA/12.9.1 GCC/13.3.0
 ```
 
 Optional: a `local.mk` with your cluster's partitions for the interactive `make cpu`, `make gpu` and
-`make gpu-serve` shells:
+`make gpu-serve` shells, and for batch jobs through `make serve-job`:
 
 ```make
 CPU_PARTITION = ...
 GPU_PARTITION = ...
 SERVE_PARTITION = ...
+SERVE_LONG_PARTITION = ...
 ```
 
 ## Configuration (the contract)
@@ -61,7 +62,7 @@ SERVE_PARTITION = ...
 | `PLYSERVE_TUNNEL_HOST` | `serve --tunnel` | Required for it. SSH destination: `user@host` or a `Host` alias |
 | `PLYSERVE_TUNNEL_KEY` | `serve --tunnel` | Optional key for the tunnel; default: ssh's own configuration |
 | `PLYSERVE_TUNNEL_BIND` | `serve --tunnel` | Address the remote machine listens on; default `127.0.0.1` |
-| `PLYSERVE_REPO` | `slurm/serve.sbatch` | The clone, if the job is not submitted from it |
+| `PLYSERVE_REPO` | `slurm/serve_model.sbatch` | The clone, if the job is not submitted from it |
 | `HF_TOKEN`, `HF_XET_*` | downloads | Passed to the Hugging Face CLI |
 
 They come from `.env` in the clone or from the environment; the environment wins. A client sees only:
@@ -83,7 +84,7 @@ fixed key.
 job exits with the client's exit code.
 
 ```bash
-sbatch -p <partition> slurm/serve.sbatch qwen-3.8-27b-fp8 -- python classify.py
+sbatch -p <partition> slurm/serve_model.sbatch qwen-3.8-27b-fp8 -- python classify.py
 # or, in an interactive GPU shell:
 uv run plyserve serve qwen-3.8-27b-fp8 -- python classify.py
 ```
@@ -93,7 +94,7 @@ writes `$PLYSERVE_HOME/endpoints/<model>.json` (owner-only, as it holds the key)
 server stops; a second `--expose` server for the same model is refused while the first one answers.
 
 ```bash
-sbatch -p <partition> slurm/serve.sbatch --expose qwen-3.8-27b-fp8
+sbatch -p <partition> slurm/serve_model.sbatch --expose qwen-3.8-27b-fp8
 # in the client job, which may start before the server is ready:
 eval "$(/path/to/plyserve/.venv/bin/plyserve endpoint --wait qwen-3.8-27b-fp8)"
 python classify.py
@@ -108,7 +109,7 @@ client machine, once vLLM answers. There, `127.0.0.1:<tunnel_port>` (from `model
 and the client uses the fixed key:
 
 ```bash
-sbatch -p <partition> slurm/serve.sbatch --tunnel qwen-3.8-27b-fp8
+sbatch -p <partition> slurm/serve_model.sbatch --tunnel qwen-3.8-27b-fp8
 # on the client machine:
 export VLLM_BASE_URL=http://127.0.0.1:18001/v1 VLLM_API_KEY=<PLYSERVE_API_KEY> VLLM_MODEL=qwen-3.8-27b-fp8
 # for an Ollama model (plyllm's ollama provider), on its own tunnel_port:
@@ -144,12 +145,12 @@ plyserve commit, host and GPUs. It never contains the key.
 ## Ollama
 
 A model with `backend = "ollama"` in `models.toml` runs on Ollama instead of vLLM. Everything above works the
-same: `serve`, the three modes, `slurm/serve.sbatch`, `endpoint` and the `VLLM_*` variables of the client, which
+same: `serve`, the three modes, `slurm/serve_model.sbatch`, `endpoint` and the `VLLM_*` variables of the client, which
 also gets `OLLAMA_BASE_URL` and `OLLAMA_API_KEY` for plyllm's `ollama` provider.
 
 ```bash
 make download MODEL=qwen-3.8-27b-q8      # only the GGUF file named in models.toml
-sbatch -p <partition> slurm/serve.sbatch qwen-3.8-27b-q8 -- python classify.py
+sbatch -p <partition> slurm/serve_model.sbatch qwen-3.8-27b-q8 -- python classify.py
 ```
 
 - **Weights.** One GGUF file from a Hugging Face repository at a pinned revision. At start, `ollama create`

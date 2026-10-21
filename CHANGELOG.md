@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- `make serve-job LENGTH=short|long ARGS='...'` submits `slurm/serve_model.sbatch` with the partition and time for
+  its length: `SERVE_PARTITION` for 4 hours, or the new `SERVE_LONG_PARTITION` (`local.mk`) for 3 days.
+
+### Changed
+
+- `slurm/serve.sbatch` is renamed to `slurm/serve_model.sbatch`.
+
 ## [0.2.0] - 2026-10-16
 
 ### Added

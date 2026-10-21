@@ -1,4 +1,4 @@
-.PHONY: test lint typecheck check format fix release release-dry-run require-version runtime runtime-ollama download cpu gpu gpu-serve
+.PHONY: test lint typecheck check format fix release release-dry-run require-version runtime runtime-ollama download cpu gpu gpu-serve serve-job
 
 test:
 	uv run --group dev pytest -q
@@ -57,7 +57,7 @@ download:
 
 # Interactive shells on Slurm compute nodes, for trying things out by hand. Run them on the login node.
 # Every value can be overridden: make gpu-serve TIME=0:30:00 MEM=128G
-# The partitions are site settings: set CPU_PARTITION, GPU_PARTITION and SERVE_PARTITION in local.mk
+# The partitions are site settings: set CPU_PARTITION, GPU_PARTITION, SERVE_PARTITION and SERVE_LONG_PARTITION in local.mk
 # (gitignored; docs/ has the values for known clusters). An empty one leaves the choice to Slurm.
 -include local.mk
 TIME ?= 1:00:00
@@ -77,10 +77,25 @@ gpu: GPUS ?= 1
 gpu:
 	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
 
-# the GPU the models are served on, with the resources of slurm/serve.sbatch
+# the GPU the models are served on, with the resources of slurm/serve_model.sbatch
 gpu-serve: PARTITION ?= $(SERVE_PARTITION)
 gpu-serve: CPUS ?= 16
 gpu-serve: MEM ?= 64G
 gpu-serve: GPUS ?= 1
 gpu-serve:
 	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
+
+# A batch job of slurm/serve_model.sbatch; ARGS are those of `plyserve serve`. LENGTH picks the partition and time:
+#   short: SERVE_PARTITION, 4 hours (tests, throughput checks); long: SERVE_LONG_PARTITION, 3 days (full runs)
+#   make serve-job LENGTH=long ARGS='qwen-3.8-27b-fp8 -- uv run --directory ../client python -u run.py'
+# A client command runs in this directory, hence `uv run --directory`. Override the time with JOB_TIME=1-00:00:00
+SERVE_PARTITION_short = $(SERVE_PARTITION)
+SERVE_PARTITION_long = $(SERVE_LONG_PARTITION)
+JOB_TIME_short = 4:00:00
+JOB_TIME_long = 3-00:00:00
+serve-job: LENGTH ?= short
+serve-job: JOB_TIME ?= $(JOB_TIME_$(LENGTH))
+serve-job:
+	@case "$(LENGTH)" in short|long) ;; *) echo "LENGTH must be short or long, not '$(LENGTH)'" >&2; exit 1;; esac
+	@test -n "$(ARGS)" || (echo "usage: make serve-job LENGTH=short|long ARGS='[--expose] [--tunnel] <model> [-- client command...]'" >&2; exit 1)
+	sbatch $(if $(SERVE_PARTITION_$(LENGTH)),-p $(SERVE_PARTITION_$(LENGTH))) -t $(JOB_TIME) slurm/serve_model.sbatch $(ARGS)

@@ -40,6 +40,7 @@ In `local.mk` (the `*fast` partitions have the shortest queues):
 CPU_PARTITION = cpufast
 GPU_PARTITION = gpufast
 SERVE_PARTITION = h200fast
+SERVE_LONG_PARTITION = h200long
 ```
 
 In `slurm/site.sh`:
@@ -53,11 +54,12 @@ export CUDA_HOME=$EBROOTCUDA CC=$(command -v gcc) CXX=$(command -v g++)
 Batch jobs need the partition on the command line (or `export SBATCH_PARTITION=h200fast`):
 
 ```bash
-sbatch -p h200fast slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
+sbatch -p h200fast slurm/serve_model.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
 ```
 
 `h200fast` is the short-queue partition. Longer runs go to `h200`, `h200long` or `h200extralong` with a matching
-`-t`. In client jobs of mode 2, the endpoint command is
+`-t`; `make serve-job LENGTH=long` uses `h200long` for 3 days. The time limits of the partitions are not recorded
+here yet (`sinfo -o "%P %l"`). In client jobs of mode 2, the endpoint command is
 `/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait <model>`.
 
 ## Results

@@ -219,7 +219,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Slurm logs of slurm/serve.sbatch, written to the submit directory
+# Slurm logs of slurm/serve_model.sbatch, written to the submit directory
 plyserve-*.out
 
 # the Ollama release unpacked by `make runtime-ollama`
@@ -228,5 +228,5 @@ runtime/ollama/
 # site settings for the Makefile (partitions); see docs/
 local.mk
 
-# site toolchain sourced by slurm/serve.sbatch (CUDA toolkit, compiler); see docs/
+# site toolchain sourced by slurm/serve_model.sbatch (CUDA toolkit, compiler); see docs/
 slurm/site.sh

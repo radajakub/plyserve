@@ -15,7 +15,7 @@ Check each row before the setup. "Needed for" says which part fails without it.
 | A folder on fast storage that every node mounts | everything | create a file on the login node, `ls` it from a job on another node |
 | Internet (PyPI, GitHub, huggingface.co) on the node that runs the setup | setup | `curl -sI https://huggingface.co` on the login node |
 | [uv](https://docs.astral.sh/uv/) | everything | `uv --version`; it installs without root and provides Python |
-| Slurm with GPUs as a GRES (`--gres=gpu:1`) | `slurm/serve.sbatch`, `make gpu` | `sinfo -o "%P %G"` lists the GPU partitions and their GRES |
+| Slurm with GPUs as a GRES (`--gres=gpu:1`) | `slurm/serve_model.sbatch`, `make gpu` | `sinfo -o "%P %G"` lists the GPU partitions and their GRES |
 | Compute nodes reach each other over TCP on any unprivileged port | mode 2 (`--expose`) | `nc -l 18080` in one job, `nc -z <its host> 18080` from another |
 | Outbound SSH from compute nodes to the client machine | mode 3 (`--tunnel`) | from a job: `ssh <client machine> true` |
 | A CUDA toolkit matching the runtime (12.9) and a C++20 compiler (GCC >= 10) on the serving nodes | vLLM | after loading them: `nvcc --version` (12.9), `c++ --version`; e.g. `module avail CUDA GCC` |
@@ -71,16 +71,18 @@ internet access. Below, `<shared>` is your folder on the shared storage.
    If the nodes reach each other only on one network (e.g. InfiniBand host names), also set
    `PLYSERVE_EXPOSE_HOST`.
 
-   In `local.mk`, the partitions for `make cpu`, `make gpu` and `make gpu-serve`. Short-queue partitions are
-   best. An empty value leaves the choice to Slurm:
+   In `local.mk`, the partitions for `make cpu`, `make gpu`, `make gpu-serve` and `make serve-job`. Short-queue
+   partitions are best, except `SERVE_LONG_PARTITION`, which takes multi-day jobs. An empty value leaves the choice
+   to Slurm:
 
    ```make
    CPU_PARTITION = <a CPU partition>
    GPU_PARTITION = <any GPU partition>
    SERVE_PARTITION = <the partition with the GPU you serve on>
+   SERVE_LONG_PARTITION = <the same GPU, for jobs of up to 3 days>
    ```
 
-   In `slurm/site.sh`, the commands that put the CUDA toolkit and the compiler on `PATH`. `slurm/serve.sbatch`
+   In `slurm/site.sh`, the commands that put the CUDA toolkit and the compiler on `PATH`. `slurm/serve_model.sbatch`
    sources it before `plyserve serve`; `serve` stops with a message if `nvcc` or `c++` (or `$CXX`) is missing. With
    environment modules:
 
@@ -147,19 +149,22 @@ Do not run `serve` on a node without a GPU (e.g. the login node): vLLM fails to 
 
 ```bash
 # mode 1: server and client in one job
-sbatch -p <serve partition> slurm/serve.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
+sbatch -p <serve partition> slurm/serve_model.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
 
 # mode 2: server in one job, clients in others
-sbatch -p <serve partition> slurm/serve.sbatch --expose qwen-3.8-27b-fp8
+sbatch -p <serve partition> slurm/serve_model.sbatch --expose qwen-3.8-27b-fp8
 # in each client job (any partition):
 eval "$(<shared>/plyserve/.venv/bin/plyserve endpoint --wait qwen-3.8-27b-fp8)"
 
 # mode 3: server in a job, client on your own machine (see "Tunnel" below)
-sbatch -p <serve partition> slurm/serve.sbatch --tunnel qwen-3.8-27b-fp8
+sbatch -p <serve partition> slurm/serve_model.sbatch --tunnel qwen-3.8-27b-fp8
 ```
 
-`slurm/serve.sbatch` asks for 1 GPU, 16 CPUs, 64 GB of memory and 4 hours. Override them on the command line
-(e.g. `-t 1-00:00:00`). Job logs go to `plyserve-<job id>.out` in the submit directory. Run records go to
+`slurm/serve_model.sbatch` asks for 1 GPU, 16 CPUs, 64 GB of memory and 4 hours. Override them on the command line
+(e.g. `-t 1-00:00:00`), or submit through `make serve-job LENGTH=short|long ARGS='...'`: `short` is
+`SERVE_PARTITION` for 4 hours, `long` is `SERVE_LONG_PARTITION` for 3 days, `JOB_TIME=...` overrides the time.
+A client command runs in the plyserve clone, so give it its own directory (`uv run --directory <client> ...`).
+Job logs go to `plyserve-<job id>.out` in the submit directory. Run records go to
 `$PLYSERVE_HOME/runs/<job id>-<model>/server.json`.
 
 Stop a server with `scancel`, not by killing its processes. `scancel` lets plyserve stop vLLM and remove the
