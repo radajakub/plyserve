@@ -1,6 +1,7 @@
 import http.server
 import json
 import os
+import shlex
 import signal
 import sys
 import textwrap
@@ -109,7 +110,7 @@ def test_submits_waits_runs_the_command_and_cancels(fake: Path, tunnel: int, mon
     assert remote(_spec(tunnel), [sys.executable, "-c", _CLIENT, str(out)]) == 3
 
     commands = _commands(fake)
-    assert commands[0] == "cd /shared/me/plyserve && make serve-job LENGTH=short ARGS='--tunnel m-fp8'"
+    assert shlex.split(commands[0]) == ["bash", "-lc", "cd /shared/me/plyserve && make serve-job LENGTH=short ARGS='--tunnel m-fp8'"]
     assert commands[1:-1] == ["squeue -h -j 42 -o %T"] * 3
     assert commands[-1] == "scancel 42"
     argv = json.loads((fake / "ssh.jsonl").read_text().splitlines()[0])["argv"]
@@ -119,7 +120,12 @@ def test_submits_waits_runs_the_command_and_cancels(fake: Path, tunnel: int, mon
 
 def test_options_reach_make_serve_job() -> None:
     command = submit_command("/shared/me/plyserve", "m-fp8", "long", True, "/shared/me/exp/models mtp.toml")
-    assert command == "cd /shared/me/plyserve && PLYSERVE_MANIFEST='/shared/me/exp/models mtp.toml' make serve-job LENGTH=long ARGS='--tunnel --monitor m-fp8'"
+    # in a login shell on the login node, so the job gets what slurm/site.sh needs from it
+    assert shlex.split(command) == [
+        "bash",
+        "-lc",
+        "cd /shared/me/plyserve && PLYSERVE_MANIFEST='/shared/me/exp/models mtp.toml' make serve-job LENGTH=long ARGS='--tunnel --monitor m-fp8'",
+    ]
 
 
 def test_job_that_ends_before_the_server_answers(fake: Path, tunnel: int, monkeypatch: pytest.MonkeyPatch) -> None:

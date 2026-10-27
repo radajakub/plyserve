@@ -155,6 +155,7 @@ It checks the job's state with `squeue` every 30 s (one SSH login each) and stop
 server answers. `--length long` takes the long partition, `--remote-manifest` sets `PLYSERVE_MANIFEST` for the job,
 and `--notify` pushes when the job starts, when the server answers and when the command ends or fails. The model's
 `tunnel_port` must be the same in both manifests. The SSH connection to the login node must work without a prompt.
+The job is submitted from a login shell (`bash -lc`), so it gets the same environment as one submitted by hand.
 
 Without a client command, `serve` runs until vLLM exits or the job ends. Every run writes `server.json` to
 `$PLYSERVE_HOME/runs/<job id>-<model>/`: model, revision, vLLM arguments and environment, package versions,

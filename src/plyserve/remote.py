@@ -35,10 +35,11 @@ def _ssh(env: dict[str, str], target: str, command: str) -> subprocess.Completed
 
 
 def submit_command(repo: str, model: str, length: str, monitor: bool, manifest: str | None) -> str:
-    # `make serve-job` in the cluster's clone, so the job gets the partition and time from its local.mk; PLYSERVE_MANIFEST reaches the job through sbatch
+    # `make serve-job` in the cluster's clone, so the job gets the partition and time from its local.mk; PLYSERVE_MANIFEST reaches the job through sbatch.
+    # In a login shell: sbatch hands the job the submitting environment, and slurm/site.sh needs what a login sets up there (e.g. Lmod's `module` function)
     args = shlex.join(["--tunnel", *(["--monitor"] if monitor else []), model])
     prefix = f"PLYSERVE_MANIFEST={shlex.quote(manifest)} " if manifest else ""
-    return f"cd {shlex.quote(repo)} && {prefix}make serve-job LENGTH={length} ARGS={shlex.quote(args)}"
+    return shlex.join(["bash", "-lc", f"cd {shlex.quote(repo)} && {prefix}make serve-job LENGTH={length} ARGS={shlex.quote(args)}"])
 
 
 def job_state(env: dict[str, str], target: str, job: str) -> str | None:
