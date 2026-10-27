@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from plyserve.manifest import DEFAULT_MANIFEST, load_manifest
+from plyserve.cli import main
+from plyserve.manifest import DEFAULT_MANIFEST, default_manifest, load_manifest
 
 _ENTRY = 'repo = "org/model"\nrevision = "abc123"\ntunnel_port = 18001\n'
 
@@ -19,6 +20,28 @@ def test_repository_manifest_loads() -> None:
     for name, spec in specs.items():
         assert spec.name == name
         assert len(spec.revision) == 40, f"{name} is not pinned to a full commit hash"
+
+
+def test_default_manifest_is_the_repositorys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PLYSERVE_MANIFEST", raising=False)
+    assert default_manifest() == DEFAULT_MANIFEST
+
+
+def test_default_manifest_from_env_file_expands_variables(no_env_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PLYSERVE_MANIFEST", raising=False)
+    monkeypatch.setenv("USER", "someone")
+    no_env_file.write_text("PLYSERVE_MANIFEST=/data/$USER/models-a.toml\n")
+    assert default_manifest() == Path("/data/someone/models-a.toml")
+
+
+def test_cli_reads_plyserve_manifest_unless_given(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    variant = tmp_path / "variant"
+    variant.mkdir()
+    monkeypatch.setenv("PLYSERVE_MANIFEST", str(_write(variant, f'[models."from-env"]\n{_ENTRY}')))
+    main(["models"])
+    assert capsys.readouterr().out.startswith("from-env\t")
+    main(["--manifest", str(_write(tmp_path, f'[models."from-flag"]\n{_ENTRY}')), "models"])
+    assert capsys.readouterr().out.startswith("from-flag\t")
 
 
 def test_vllm_args_pin_weights_and_tokenizer(tmp_path: Path) -> None:

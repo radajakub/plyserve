@@ -5,7 +5,7 @@ from pathlib import Path
 
 from plyserve.download import download
 from plyserve.endpoint import find_endpoint, shell_exports
-from plyserve.manifest import DEFAULT_MANIFEST, ModelSpec, load_manifest
+from plyserve.manifest import ModelSpec, default_manifest, load_manifest
 from plyserve.serve import serve
 
 
@@ -28,7 +28,7 @@ def _download(args: argparse.Namespace) -> None:
 def _serve(args: argparse.Namespace) -> None:
     # argparse keeps the `--` that separates the client command on some Python versions
     command = args.client[1:] if args.client[:1] == ["--"] else args.client
-    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose, tunnel=args.tunnel))
+    raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose, tunnel=args.tunnel, monitor=args.monitor))
 
 
 def _endpoint(args: argparse.Namespace) -> None:
@@ -38,7 +38,7 @@ def _endpoint(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="plyserve")
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="models.toml to read (default: the one in this repository)")
+    parser.add_argument("--manifest", type=Path, help="models.toml to read (default: PLYSERVE_MANIFEST, else the one in this repository)")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("models", help="list the models in the manifest").set_defaults(run=_models)
@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     serve_parser.add_argument(
         "--tunnel", action="store_true", help="forward the model's tunnel_port on another machine to the server over SSH (see PLYSERVE_TUNNEL_* in .env.example)"
     )
+    serve_parser.add_argument("--monitor", action="store_true", help="sample the GPU (nvidia-smi, and DCGM if installed) and the CPU (top) into the run folder while serving")
     serve_parser.add_argument("--port", type=int, help="port for the server (default: a free one)")
     serve_parser.add_argument("--timeout", type=float, default=1800.0, help="seconds to wait for the model to load (default: 1800)")
     serve_parser.add_argument(
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     try:
+        args.manifest = args.manifest or default_manifest()
         args.run(args)
     except (RuntimeError, FileNotFoundError, ValueError) as error:
         # setup mistakes (no PLYSERVE_HOME, no runtime, a bad manifest): the message says what to do

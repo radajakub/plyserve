@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from plyserve.settings import REPOSITORY
+from plyserve.settings import REPOSITORY, environment
 
 DEFAULT_MANIFEST = REPOSITORY / "models.toml"
 
@@ -51,6 +52,12 @@ class ModelSpec:
         lines = [f"FROM {snapshot / self.file}"] if self.file else []
         lines += [f"PARAMETER {name} {json.dumps(value) if isinstance(value, str) else value}" for name, value in self.parameters]
         return "\n".join(lines) + "\n"
+
+
+def default_manifest() -> Path:
+    # PLYSERVE_MANIFEST, e.g. a variant of models.toml for one experiment kept outside the clone, else the clone's own. $USER and ~ are expanded
+    value = environment().get("PLYSERVE_MANIFEST")
+    return Path(os.path.expandvars(value)).expanduser() if value else DEFAULT_MANIFEST
 
 
 def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, ModelSpec]:

@@ -1,11 +1,13 @@
 import http.server
 import json
 import os
+import shutil
 import signal
 import sys
 import textwrap
 import threading
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -350,6 +352,86 @@ def test_cli_expose(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
         main(["serve", "--expose", "m-fp8"])
     assert calls[0]["expose"] is True and calls[0]["command"] == []
+
+
+def test_cli_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr("plyserve.cli.serve", lambda spec, **kwargs: calls.append(kwargs) or 0)
+    monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _SPEC})
+    with pytest.raises(SystemExit):
+        main(["serve", "--monitor", "--tunnel", "m-fp8"])
+    assert calls[0]["monitor"] is True and calls[0]["tunnel"] is True
+
+
+# stands in for a sampler (nvidia-smi -l, top -b, dcgmi dmon): records its pid in FAKE_SAMPLERS, then prints its arguments until stopped.
+# Called once (serve's own nvidia-smi query, `dcgmi discovery`), it prints one line and exits
+_FAKE_SAMPLER = """#!/bin/sh
+case "$*" in
+    discovery*) echo "$(basename "$0") once: $*"; exit 0 ;;
+    *" -l "*|"-b "*|dmon*) ;;
+    *) echo "$(basename "$0") once: $*"; exit 0 ;;
+esac
+echo $$ >> "$FAKE_SAMPLERS"
+while :; do echo "$(basename "$0") $*"; sleep 0.05; done
+"""
+
+
+@pytest.fixture
+def fake_samplers(fake: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # only the stand-ins and the two tools they use, so a real nvidia-smi, top or dcgmi never runs
+    for tool in ("nvidia-smi", "top", "dcgmi"):
+        _executable(fake / "toolchain" / tool, _FAKE_SAMPLER)
+    for tool in ("sleep", "basename"):
+        (fake / "toolchain" / tool).symlink_to(str(shutil.which(tool)))
+    monkeypatch.setenv("PATH", str(fake / "toolchain"))
+    monkeypatch.setenv("FAKE_SAMPLERS", str(fake / "samplers.txt"))
+    return fake
+
+
+def test_monitor_samples_into_the_run_folder_while_serving(fake_samplers: Path) -> None:
+    serve(_SPEC, command=[sys.executable, "-c", "import time; time.sleep(0.5)"], monitor=True)
+
+    [run_dir] = (fake_samplers / "home" / "runs").glob("*-m-fp8")
+    record = json.loads((run_dir / "server.json").read_text())
+    assert record["monitor"] == {"files": ["dcgm-gpus.txt", "gpu.csv", "top.txt", "dcgm.txt"], "skipped": []}
+    assert (run_dir / "gpu.csv").read_text().startswith("nvidia-smi --query-gpu=timestamp,index,pci.bus_id,")
+    assert (run_dir / "top.txt").read_text().startswith(f"top -b -d 5 -u {os.getuid()}\n")
+    assert (run_dir / "dcgm-gpus.txt").read_text() == "dcgmi once: discovery -l\n"
+    # dcgmi prints no time, so each line gets one
+    first = (run_dir / "dcgm.txt").read_text().splitlines()[0]
+    stamp, rest = first.split(" ", 1)
+    assert datetime.fromisoformat(stamp) and rest == "dcgmi dmon -e 1001,1002,1003,1004,1005 -d 2000"
+    pids = [int(line) for line in (fake_samplers / "samplers.txt").read_text().split()]
+    assert len(pids) == 3 and all(_gone(pid) for pid in pids)
+
+
+def test_monitor_without_dcgmi_keeps_nvidia_smi(fake_samplers: Path) -> None:
+    (fake_samplers / "toolchain" / "dcgmi").unlink()
+    serve(_SPEC, command=[sys.executable, "-c", "pass"], monitor=True)
+
+    [record_file] = (fake_samplers / "home" / "runs").glob("*-m-fp8/server.json")
+    assert json.loads(record_file.read_text())["monitor"] == {"files": ["gpu.csv", "top.txt"], "skipped": ["dcgmi: not on PATH"]}
+
+
+@pytest.mark.parametrize("tool", ["nvidia-smi", "top"])
+def test_monitor_needs_its_tools_before_vllm_starts(fake_samplers: Path, tool: str) -> None:
+    (fake_samplers / "toolchain" / tool).unlink()
+    with pytest.raises(RuntimeError, match=f"--monitor needs {tool}"):
+        serve(_SPEC, command=[sys.executable, "-c", "pass"], monitor=True)
+    assert not (fake_samplers / "vllm.json").exists()
+
+
+def test_monitor_reports_a_sampler_that_exits(fake_samplers: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _executable(fake_samplers / "toolchain" / "nvidia-smi", "#!/bin/sh\necho 'unknown field'\nexit 2\n")
+    serve(_SPEC, command=[sys.executable, "-c", "import time; time.sleep(0.5)"], monitor=True)
+    assert "the nvidia-smi sampler exited with code 2; its output is in gpu.csv" in capsys.readouterr().out
+
+
+def test_without_monitor_no_samplers_run(fake_samplers: Path) -> None:
+    serve(_SPEC, command=[sys.executable, "-c", "pass"])
+    [record_file] = (fake_samplers / "home" / "runs").glob("*-m-fp8/server.json")
+    assert "monitor" not in json.loads(record_file.read_text())
+    assert not (fake_samplers / "samplers.txt").exists()
 
 
 # stands in for ssh: records each start (argv, pid) as a line in FAKE_SSH_RECORD, stays up for the next of the comma-separated FAKE_SSH_LIFETIMES

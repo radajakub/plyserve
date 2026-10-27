@@ -62,6 +62,7 @@ SERVE_LONG_PARTITION = ...
 | `PLYSERVE_TUNNEL_HOST` | `serve --tunnel` | Required for it. SSH destination: `user@host` or a `Host` alias |
 | `PLYSERVE_TUNNEL_KEY` | `serve --tunnel` | Optional key for the tunnel; default: ssh's own configuration |
 | `PLYSERVE_TUNNEL_BIND` | `serve --tunnel` | Address the remote machine listens on; default `127.0.0.1` |
+| `PLYSERVE_MANIFEST` | plyserve | Optional `models.toml` to read instead of the clone's, e.g. a variant for one experiment; `--manifest` wins |
 | `PLYSERVE_REPO` | `slurm/serve_model.sbatch` | The clone, if the job is not submitted from it |
 | `HF_TOKEN`, `HF_XET_*` | downloads | Passed to the Hugging Face CLI |
 
@@ -141,6 +142,12 @@ Anyone on the client machine can reach `127.0.0.1:<tunnel_port>`, so the API key
 Without a client command, `serve` runs until vLLM exits or the job ends. Every run writes `server.json` to
 `$PLYSERVE_HOME/runs/<job id>-<model>/`: model, revision, vLLM arguments and environment, package versions,
 plyserve commit, host and GPUs. It never contains the key.
+
+`serve --monitor` also samples the GPU and CPU into the same folder while the server runs: `gpu.csv` (nvidia-smi
+every 2 s), `top.txt` (the user's processes every 5 s) and, where DCGM is installed, `dcgm.txt` (SM, tensor and DRAM
+activity every 2 s, with timestamps) and `dcgm-gpus.txt` (DCGM's GPU ids and bus ids; DCGM lists every GPU of the
+node, `gpu.csv` gives the job's bus ids). nvidia-smi's `utilization.gpu` reads 100% whenever any kernel runs, so
+DCGM is what says how much of the GPU the server uses. `server.json` lists the files and what was skipped.
 
 ## Ollama
 

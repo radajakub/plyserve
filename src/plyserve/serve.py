@@ -18,6 +18,7 @@ from types import FrameType
 
 from plyserve.endpoint import Endpoint, client_variables, endpoint_path, healthy, read_endpoint, remove_endpoint, write_endpoint
 from plyserve.manifest import ModelSpec
+from plyserve.monitor import Monitor, samplers
 from plyserve.proxy import KeyProxy
 from plyserve.settings import REPOSITORY, environment, hf_home, home, ollama_executable, runtime_executable
 
@@ -285,11 +286,13 @@ def toolchain(env: dict[str, str]) -> dict[str, str]:
     return {"nvcc": nvcc, "nvcc_version": _version_line([nvcc, "--version"], last=True), "cxx": cxx, "cxx_version": _version_line([cxx, "--version"])}
 
 
-def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False, tunnel: bool = False) -> int:
+def serve(
+    spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, command: Sequence[str] = (), expose: bool = False, tunnel: bool = False, monitor: bool = False
+) -> int:
     # starts vLLM or Ollama (spec.backend), waits until it answers, then runs `command` against it and stops the server when the command ends;
     # without a command it serves until the server exits. Returns the exit code of the command (or of the server).
     # `expose` makes the server reachable from other nodes and publishes it in an endpoint file;
-    # `tunnel` forwards the model's tunnel_port on another machine to it over SSH
+    # `tunnel` forwards the model's tunnel_port on another machine to it over SSH; `monitor` samples the GPU and CPU into the run folder while it serves
     ollama = spec.backend == "ollama"
     engine, weights = "Ollama" if ollama else "vLLM", snapshot(spec)
     required = weights / spec.file if spec.file else weights
@@ -305,6 +308,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
         raise RuntimeError("--tunnel needs a fixed PLYSERVE_API_KEY, the same one the remote client uses (see .env.example)")
     if tunnel and shutil.which("ssh", path=env.get("PATH")) is None:
         raise RuntimeError("--tunnel needs ssh, which is not on PATH")
+    found, skipped = samplers(env) if monitor else ([], [])
     port = port or free_port(bind)
     # a fixed key from .env lets clients outside the cluster keep theirs; otherwise a new one for every run
     key = env.get("PLYSERVE_API_KEY") or secrets.token_urlsafe(32)
@@ -346,7 +350,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
     }
 
     previous = {name: signal.signal(name, _on_signal) for name in (signal.SIGTERM, signal.SIGINT)}
-    server, proxy, published, forward = None, None, None, None
+    server, proxy, published, forward, sampling = None, None, None, None, None
     try:
         deadline = time.monotonic() + timeout
         server = subprocess.Popen(argv, env=server_env, start_new_session=True)
@@ -358,6 +362,9 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
         record["ready_at"] = _now()
         run_dir = home() / "runs" / f"{env.get('SLURM_JOB_ID') or datetime.now().strftime('%Y%m%d-%H%M%S')}-{spec.name}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        if monitor:
+            sampling = Monitor(run_dir, env, found)
+            record["monitor"] = {"files": sampling.files, "skipped": skipped}
         (run_dir / "server.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         print(f"plyserve: {spec.name} is ready at {base_url}; run record in {run_dir}", flush=True)
         if expose:
@@ -381,6 +388,8 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
                     raise RuntimeError(f"{engine} exited with code {server_code} while the client was running; its log is above")
                 if forward is not None:
                     forward.check()
+                if sampling is not None:
+                    sampling.check()
                 time.sleep(POLL_INTERVAL)
             return code
         finally:
@@ -399,5 +408,7 @@ def serve(spec: ModelSpec, *, port: int | None = None, timeout: float = 1800.0, 
             proxy.stop()
         if server is not None:
             _stop(server, group=True)
+        if sampling is not None:
+            sampling.stop()
         for name, handler in previous.items():
             signal.signal(name, handler)
