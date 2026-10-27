@@ -23,6 +23,14 @@ revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
 tunnel_port = 18001
 args = ["--reasoning-parser", "qwen3", "--language-model-only", "--max-model-len", "65536"]
 
+# The same checkpoint with speculative decoding by its own MTP layer (text_config.mtp_num_hidden_layers = 1), one draft token per step as in vLLM's
+# Qwen3.5-27B recipe. A separate served name, so annotations say which server made them and the two can be benchmarked side by side
+[models."qwen-3.8-27b-fp8-mtp"]
+repo = "Qwen/Qwen3.8-27B-FP8"
+revision = "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+tunnel_port = 18004
+args = ["--reasoning-parser", "qwen3", "--language-model-only", "--max-model-len", "65536", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 1}']
+
 # Google publishes no FP8 checkpoint, so vLLM quantizes the official BF16 weights to FP8 when it loads them.
 # Alternatives: RedHatAI/gemma-4-31B-it-FP8-dynamic (third-party, with published recovery numbers) or Google's
 # 4-bit QAT google/gemma-4-31B-it-qat-w4a16-ct. Not yet served with vLLM's default kernels

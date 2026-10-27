@@ -18,6 +18,8 @@ All notable changes to this project are documented in this file. The format is b
   the cluster's login node, waits until the server answers through the tunnel, runs the command and cancels the
   job when the command ends. `--notify` pushes its progress to ntfy; `--fetch` copies the job's run folder and
   Slurm log into `runs/<job id>-<model>/` of the clone (gitignored).
+- `qwen-3.8-27b-fp8-mtp` in `models.toml`: the Qwen3.8 FP8 checkpoint with speculative decoding by its MTP layer
+  (`--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`), tunnel port 18004.
 
 ### Changed
 
