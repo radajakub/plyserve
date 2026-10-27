@@ -222,6 +222,9 @@ __marimo__/
 # Slurm logs of slurm/serve_model.sbatch, written to the submit directory
 plyserve-*.out
 
+# job files that `plyserve remote --fetch` copies from the cluster, one <job id>-<model>/ each
+/runs/
+
 # the Ollama release unpacked by `make runtime-ollama`
 runtime/ollama/
 

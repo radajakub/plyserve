@@ -18,7 +18,8 @@ from plyserve.remote import remote, submit_command
 
 # stands in for ssh to the login node: records each remote command in FAKE_REMOTE_RECORD and answers it. `make serve-job` submits job 42 (FAKE_SUBMIT_FAIL: no job);
 # squeue prints the next of the comma-separated FAKE_STATES (the last one repeats; SSHFAIL exits 255 as a failed connection) and, at RUNNING, starts the
-# server behind the tunnel by creating FAKE_READY (unless FAKE_NEVER_READY); scancel exits with FAKE_SCANCEL_CODE
+# server behind the tunnel by creating FAKE_READY (unless FAKE_NEVER_READY); after scancel the job has left the queue; scancel exits with FAKE_SCANCEL_CODE.
+# The cluster's PLYSERVE_HOME resolves to FAKE_REMOTE_HOME
 _FAKE_SSH = """
 import json, os, sys
 command = sys.argv[-1]
@@ -32,6 +33,10 @@ if "make serve-job" in command:
         print("sbatch: error: invalid partition", file=sys.stderr)
         sys.exit(2)
     print("Submitted batch job 42")
+elif "from plyserve.settings import home" in command:
+    print(os.environ["FAKE_REMOTE_HOME"])
+elif command.startswith("squeue") and any(call["argv"][-1].startswith("scancel") for call in calls):
+    print("")
 elif command.startswith("squeue"):
     states = os.environ.get("FAKE_STATES", "RUNNING").split(",")
     state = states[min(sum(call["argv"][-1].startswith("squeue") for call in calls), len(states) - 1)]
@@ -45,6 +50,18 @@ elif command.startswith("scancel"):
     if code:
         print("scancel: error: Invalid job id specified", file=sys.stderr)
     sys.exit(code)
+"""
+
+# stands in for scp from the cluster: the cluster's paths are on this machine, so it copies host:path like `scp -r`, and records the call in FAKE_SCP_RECORD
+_FAKE_SCP = """
+import os, shutil, sys
+source, destination = sys.argv[-2].split(":", 1)[1], sys.argv[-1]
+with open(os.environ["FAKE_SCP_RECORD"], "a") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+if not os.path.exists(source):
+    print(f"scp: {source}: No such file or directory", file=sys.stderr)
+    sys.exit(1)
+shutil.copytree(source, destination) if os.path.isdir(source) else shutil.copy(source, destination)
 """
 
 # a client that records the variables it was given and exits with code 3
@@ -81,6 +98,11 @@ def fake(tmp_path: Path, tunnel: int, monkeypatch: pytest.MonkeyPatch) -> Path:
     ssh = bin_dir / "ssh"
     ssh.write_text(f"#!{sys.executable}\n{textwrap.dedent(_FAKE_SSH)}")
     ssh.chmod(0o755)
+    scp = bin_dir / "scp"
+    scp.write_text(f"#!{sys.executable}\n{textwrap.dedent(_FAKE_SCP)}")
+    scp.chmod(0o755)
+    monkeypatch.setenv("FAKE_SCP_RECORD", str(tmp_path / "scp.txt"))
+    monkeypatch.setenv("FAKE_REMOTE_HOME", str(tmp_path / "cluster-home"))
     monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
     monkeypatch.setenv("FAKE_REMOTE_RECORD", str(tmp_path / "ssh.jsonl"))
     monkeypatch.setenv("FAKE_READY", str(tmp_path / "ready"))
@@ -91,6 +113,7 @@ def fake(tmp_path: Path, tunnel: int, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(remote_module, "QUEUE_INTERVAL", 0.05)
     monkeypatch.setattr(remote_module, "POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(remote_module, "FETCH_DIR", tmp_path / "fetched")
     return tmp_path
 
 
@@ -115,6 +138,7 @@ def test_submits_waits_runs_the_command_and_cancels(fake: Path, tunnel: int, mon
     assert commands[-1] == "scancel 42"
     argv = json.loads((fake / "ssh.jsonl").read_text().splitlines()[0])["argv"]
     assert argv[:-1] == ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "me@login"]
+    assert not (fake / "fetched").exists()  # only with --fetch
     assert json.loads(out.read_text()) == {"VLLM_BASE_URL": f"http://127.0.0.1:{tunnel}/v1", "VLLM_API_KEY": "fixed-key", "VLLM_MODEL": "m-fp8"}
 
 
@@ -191,6 +215,72 @@ def test_failed_scancel_says_to_cancel_by_hand(fake: Path, tunnel: int, monkeypa
 
 
 @pytest.fixture
+def cluster(fake: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # the clone on the cluster, with the Slurm log of job 42; the run folder of job 42 is cluster-home/runs/42-m-fp8
+    repo = fake / "cluster-repo"
+    repo.mkdir()
+    (repo / "plyserve-42.out").write_text("vLLM log\n")
+    monkeypatch.setenv("PLYSERVE_REMOTE_REPO", str(repo))
+    return fake / "cluster-home" / "runs" / "42-m-fp8"
+
+
+def test_fetch_copies_the_run_folder_and_log_by_job_id_after_the_job_ends(fake: Path, tunnel: int, cluster: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cluster.mkdir(parents=True)
+    (cluster / "server.json").write_text("{}")
+    (cluster / "gpu.csv").write_text("timestamp\n")
+    # a folder of another job and another model, which must stay where they are
+    (cluster.parent / "41-m-fp8").mkdir()
+    (cluster.parent / "42-other").mkdir()
+
+    assert remote(_spec(tunnel), [sys.executable, "-c", "pass"], fetch_files=True) == 0
+
+    local = fake / "fetched" / "42-m-fp8"
+    assert sorted(path.name for path in local.iterdir()) == ["gpu.csv", "plyserve-42.out", "server.json"]
+    assert (local / "plyserve-42.out").read_text() == "vLLM log\n"
+    assert sorted(path.name for path in (fake / "fetched").iterdir()) == ["42-m-fp8"]
+    commands = _commands(fake)
+    # copied only once the job has left the queue after scancel
+    assert commands.index("scancel 42") < commands.index("squeue -h -j 42 -o %T", commands.index("scancel 42"))
+    assert f"the files of job 42 are in {local}" in capsys.readouterr().out
+
+
+def test_fetch_after_a_failed_start_keeps_the_log(fake: Path, tunnel: int, cluster: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("FAKE_STATES", "FAILED")
+    with pytest.raises(RuntimeError, match=r"job 42 ended \(FAILED\)"):
+        remote(_spec(tunnel), [sys.executable, "-c", "pass"], fetch_files=True)
+    local = fake / "fetched" / "42-m-fp8"
+    assert sorted(path.name for path in local.iterdir()) == ["plyserve-42.out"]
+    out = capsys.readouterr().out
+    assert f"the files of job 42 are only partly in {local}; not copied: me@login:{cluster} (scp: {cluster}: No such file or directory)" in out
+
+
+def test_fetch_never_overwrites(fake: Path, tunnel: int, cluster: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    local = fake / "fetched" / "42-m-fp8"
+    local.mkdir(parents=True)
+    (local / "gpu.csv").write_text("earlier\n")
+    assert remote(_spec(tunnel), [sys.executable, "-c", "pass"], fetch_files=True) == 0
+    assert [path.name for path in local.iterdir()] == ["gpu.csv"] and (local / "gpu.csv").read_text() == "earlier\n"
+    assert not (fake / "scp.txt").exists()
+    assert f"not copied: {local} exists already" in capsys.readouterr().out
+
+
+def test_fetch_gives_up_waiting_for_a_job_that_stays_in_the_queue(
+    fake: Path, tunnel: int, cluster: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(remote_module, "FETCH_WAIT", 0.2)
+
+    def running(env: dict[str, str], target: str, job: str) -> str:
+        # Slurm keeps saying RUNNING, also after scancel; the server behind the tunnel is up
+        (fake / "ready").touch()
+        return "RUNNING"
+
+    monkeypatch.setattr(remote_module, "job_state", running)
+    assert remote(_spec(tunnel), [sys.executable, "-c", "pass"], fetch_files=True) == 0
+    assert "job 42 is still in the queue (RUNNING) after 0.2 s; copying what is there" in capsys.readouterr().out
+    assert (fake / "fetched" / "42-m-fp8" / "plyserve-42.out").exists()
+
+
+@pytest.fixture
 def ntfy(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, str, str | None]]]:
     # records each push as (path, body, Authorization header)
     pushes: list[tuple[str, str, str | None]] = []
@@ -247,7 +337,7 @@ def test_cli_remote(monkeypatch: pytest.MonkeyPatch) -> None:
         main(["remote", "--length", "long", "--monitor", "--remote-manifest", "/x/models.toml", "--notify", "m-fp8", "--", "uv", "run", "bench.py", "--levels", "64"])
     command, kwargs = calls[0]
     assert command == ["uv", "run", "bench.py", "--levels", "64"]
-    assert kwargs == {"length": "long", "monitor": True, "manifest": "/x/models.toml", "timeout": 3600.0, "notify": True}
+    assert kwargs == {"length": "long", "monitor": True, "manifest": "/x/models.toml", "timeout": 3600.0, "notify": True, "fetch_files": False}
 
 
 def test_cli_remote_needs_a_command(monkeypatch: pytest.MonkeyPatch) -> None:

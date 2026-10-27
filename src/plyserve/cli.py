@@ -40,7 +40,9 @@ def _remote(args: argparse.Namespace) -> None:
     command = _command(args)
     if not command:
         raise SystemExit("usage: plyserve remote [options] <model> -- <command...>")
-    raise SystemExit(remote(_model(args), command, length=args.length, monitor=args.monitor, manifest=args.remote_manifest, timeout=args.timeout, notify=args.notify))
+    raise SystemExit(
+        remote(_model(args), command, length=args.length, monitor=args.monitor, manifest=args.remote_manifest, timeout=args.timeout, notify=args.notify, fetch_files=args.fetch)
+    )
 
 
 def _endpoint(args: argparse.Namespace) -> None:
@@ -90,6 +92,9 @@ def main(argv: list[str] | None = None) -> None:
         "--notify",
         action="store_true",
         help="push an ntfy notification when the job starts, when the server answers, and when the command ends or fails (needs NTFY_URL and NTFY_TOPIC)",
+    )
+    remote_parser.add_argument(
+        "--fetch", action="store_true", help="once the job has ended, copy its run folder and Slurm log into runs/<job id>-<model>/ in this clone (gitignored)"
     )
     remote_parser.add_argument("client", nargs="*", metavar="command", help="after --: the command to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set")
     remote_parser.set_defaults(run=_remote)

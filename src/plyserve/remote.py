@@ -9,29 +9,39 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from plyserve.endpoint import healthy
 from plyserve.manifest import ModelSpec
 from plyserve.serve import TUNNEL_BIND, _on_signal, _stop, _Stopped, client_environment
-from plyserve.settings import environment
+from plyserve.settings import REPOSITORY, environment
 
 # seconds between squeue calls while the job waits and loads; each is a new SSH login on the cluster's login node
 QUEUE_INTERVAL = 30.0
 # seconds between health checks through the tunnel
 POLL_INTERVAL = 5.0
-# seconds one SSH call to the login node may take
+# seconds one SSH call to the login node may take, and one copy of a job's files
 SSH_TIMEOUT = 120.0
+COPY_TIMEOUT = 600.0
+# where `--fetch` puts each job's files on the client machine, as <job id>-<model>/ (gitignored)
+FETCH_DIR = REPOSITORY / "runs"
+# seconds `--fetch` waits after scancel for the job to leave the queue, so serve has stopped the samplers and written its last lines
+FETCH_WAIT = 300.0
 # Slurm states of a job that has not ended; any other state, or none (the job left the queue), means it ended
 ACTIVE_STATES = ("PENDING", "CONFIGURING", "RUNNING")
 
 
-def _ssh(env: dict[str, str], target: str, command: str) -> subprocess.CompletedProcess[str]:
-    # `command` in a shell on the login node. BatchMode never prompts; a call that hangs counts as a failed connection (ssh's own code 255)
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", target, command]
+def _run(argv: list[str], env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
+    # a call that hangs counts as a failed connection (code 255, as ssh and scp give)
     try:
-        return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=SSH_TIMEOUT)
+        return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(argv, 255, "", f"ssh to {target} did not finish within {SSH_TIMEOUT:g} s")
+        return subprocess.CompletedProcess(argv, 255, "", f"{argv[0]} to {argv[-2]} did not finish within {timeout:g} s")
+
+
+def _ssh(env: dict[str, str], target: str, command: str) -> subprocess.CompletedProcess[str]:
+    # `command` in a shell on the login node; BatchMode never prompts
+    return _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", target, command], env, SSH_TIMEOUT)
 
 
 def submit_command(repo: str, model: str, length: str, monitor: bool, manifest: str | None) -> str:
@@ -61,6 +71,38 @@ def push(env: dict[str, str], message: str) -> None:
         print(f"plyserve: the ntfy push failed ({error})", flush=True)
 
 
+def fetch(env: dict[str, str], target: str, repo: str, job: str, model: str) -> tuple[Path, list[str]]:
+    # copies the job's run folder ($PLYSERVE_HOME/runs/<job>-<model> on the cluster, with server.json and any --monitor samples) and its Slurm log
+    # (plyserve-<job>.out in the clone there) into FETCH_DIR/<job>-<model>. Never overwrites; returns that folder and what could not be copied
+    local = FETCH_DIR / f"{job}-{model}"
+    if local.exists():
+        return local, [f"{local} exists already, so nothing was copied"]
+    deadline = time.monotonic() + FETCH_WAIT
+    # COMPLETING: Slurm is still stopping the job's processes
+    while (state := job_state(env, target, job)) is None or state in (*ACTIVE_STATES, "COMPLETING"):
+        if time.monotonic() > deadline:
+            print(f"plyserve: job {job} is still in the queue ({state or 'no answer'}) after {FETCH_WAIT:g} s; copying what is there", flush=True)
+            break
+        time.sleep(QUEUE_INTERVAL)
+    missing: list[str] = []
+
+    def copy(source: str, destination: Path) -> None:
+        copied = _run(["scp", "-r", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", f"{target}:{source}", str(destination)], env, COPY_TIMEOUT)
+        if copied.returncode != 0:
+            missing.append(f"{target}:{source} ({copied.stderr.strip() or f'scp exit code {copied.returncode}'})")
+
+    local.parent.mkdir(parents=True, exist_ok=True)
+    # the cluster's PLYSERVE_HOME is in its own .env, so plyserve there resolves it. The run folder becomes `local`; a job that never got ready has none
+    resolved = _ssh(env, target, f"cd {shlex.quote(repo)} && .venv/bin/python -c {shlex.quote('from plyserve.settings import home; print(home())')}")
+    if resolved.returncode == 0 and (lines := resolved.stdout.strip().splitlines()):
+        copy(f"{lines[-1]}/runs/{job}-{model}", local)
+    else:
+        missing.append(f"the run folder: PLYSERVE_HOME on {target} did not resolve ({resolved.stderr.strip()})")
+    local.mkdir(exist_ok=True)
+    copy(f"{repo}/plyserve-{job}.out", local / f"plyserve-{job}.out")
+    return local, missing
+
+
 def _wait_until_ready(env: dict[str, str], target: str, repo: str, job: str, health: str, key: str, timeout: float, say: Callable[[str, bool], None]) -> None:
     state, next_check, deadline = "", 0.0, None
     while not healthy(health, key):
@@ -86,11 +128,20 @@ def _wait_until_ready(env: dict[str, str], target: str, repo: str, job: str, hea
 
 
 def remote(
-    spec: ModelSpec, command: Sequence[str], *, length: str = "short", monitor: bool = False, manifest: str | None = None, timeout: float = 3600.0, notify: bool = False
+    spec: ModelSpec,
+    command: Sequence[str],
+    *,
+    length: str = "short",
+    monitor: bool = False,
+    manifest: str | None = None,
+    timeout: float = 3600.0,
+    notify: bool = False,
+    fetch_files: bool = False,
 ) -> int:
     # On the client machine (mode 3): submits `serve --tunnel` as a job through the cluster's login node, waits until the server answers through the tunnel,
     # runs `command` against it and cancels the job when the command ends, fails or plyserve is stopped. Returns the exit code of the command.
-    # `manifest` is a models.toml on the cluster for the job (PLYSERVE_MANIFEST there); `notify` pushes when the job runs, the server answers and the command ends
+    # `manifest` is a models.toml on the cluster for the job (PLYSERVE_MANIFEST there); `notify` pushes when the job runs, the server answers and the command ends;
+    # `fetch_files` copies the job's run folder and log to FETCH_DIR once the job has ended
     env = environment()
     target, repo, key = env.get("PLYSERVE_REMOTE"), env.get("PLYSERVE_REMOTE_REPO"), env.get("PLYSERVE_API_KEY")
     if not target or not repo:
@@ -148,3 +199,12 @@ def remote(
                 say(f"scancel {job} on {target} exited with code {cancelled.returncode} ({cancelled.stderr.strip()}); if the job still runs, cancel it by hand")
         for name, handler in previous.items():
             signal.signal(name, handler)
+        if job is not None and fetch_files:
+            try:
+                local, missing = fetch(env, target, repo, job, spec.name)
+            except KeyboardInterrupt:
+                local, missing = FETCH_DIR / f"{job}-{spec.name}", ["the rest: the copy was stopped with Ctrl-C"]
+            if missing:
+                say(f"the files of job {job} are only partly in {local}; not copied: " + "; ".join(missing))
+            else:
+                say(f"the files of job {job} are in {local}")
