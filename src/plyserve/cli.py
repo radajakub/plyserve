@@ -6,6 +6,7 @@ from pathlib import Path
 from plyserve.download import download
 from plyserve.endpoint import find_endpoint, shell_exports
 from plyserve.manifest import ModelSpec, default_manifest, load_manifest
+from plyserve.remote import remote
 from plyserve.serve import serve
 
 
@@ -25,10 +26,21 @@ def _download(args: argparse.Namespace) -> None:
     download(_model(args))
 
 
-def _serve(args: argparse.Namespace) -> None:
+def _command(args: argparse.Namespace) -> list[str]:
     # argparse keeps the `--` that separates the client command on some Python versions
-    command = args.client[1:] if args.client[:1] == ["--"] else args.client
+    return args.client[1:] if args.client[:1] == ["--"] else args.client
+
+
+def _serve(args: argparse.Namespace) -> None:
+    command = _command(args)
     raise SystemExit(serve(_model(args), port=args.port, timeout=args.timeout, command=command, expose=args.expose, tunnel=args.tunnel, monitor=args.monitor))
+
+
+def _remote(args: argparse.Namespace) -> None:
+    command = _command(args)
+    if not command:
+        raise SystemExit("usage: plyserve remote [options] <model> -- <command...>")
+    raise SystemExit(remote(_model(args), command, length=args.length, monitor=args.monitor, manifest=args.remote_manifest, timeout=args.timeout, notify=args.notify))
 
 
 def _endpoint(args: argparse.Namespace) -> None:
@@ -65,6 +77,22 @@ def main(argv: list[str] | None = None) -> None:
         help="after --: the client to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set; the server stops when it exits. Without it, serve until the job ends",
     )
     serve_parser.set_defaults(run=_serve)
+
+    remote_parser = commands.add_parser(
+        "remote", help="on the client machine: run `serve --tunnel` as a job on the cluster, run a command against it, then cancel the job (see PLYSERVE_REMOTE in .env.example)"
+    )
+    remote_parser.add_argument("model", help="served name from the manifest; its tunnel_port must be the same in the cluster's manifest")
+    remote_parser.add_argument("--length", choices=("short", "long"), default="short", help="the job's partition and time limit, as LENGTH of `make serve-job` (default: short)")
+    remote_parser.add_argument("--monitor", action="store_true", help="pass --monitor to serve: GPU and CPU samples in the run folder on the cluster")
+    remote_parser.add_argument("--remote-manifest", help="models.toml on the cluster for the job, as PLYSERVE_MANIFEST there (default: the cluster's own setting)")
+    remote_parser.add_argument("--timeout", type=float, default=3600.0, help="seconds to wait for the server once the job runs (default: 3600)")
+    remote_parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="push an ntfy notification when the job starts, when the server answers, and when the command ends or fails (needs NTFY_URL and NTFY_TOPIC)",
+    )
+    remote_parser.add_argument("client", nargs="*", metavar="command", help="after --: the command to run with VLLM_BASE_URL, VLLM_API_KEY and VLLM_MODEL set")
+    remote_parser.set_defaults(run=_remote)
 
     endpoint_parser = commands.add_parser("endpoint", help='print exports for a server started with --expose: eval "$(plyserve endpoint <model>)"')
     endpoint_parser.add_argument("model", help="served name from the manifest")

@@ -14,6 +14,9 @@ All notable changes to this project are documented in this file. The format is b
   batch job (`make serve-job`) can serve a variant of a model kept outside the clone.
 - `serve --monitor` samples the GPU (nvidia-smi; DCGM's SM, tensor and DRAM activity where installed) and the CPU
   (top) into the run folder while the server runs; `server.json` lists the files.
+- `plyserve remote <model> -- <command>` runs mode 3 from the client machine: it submits `serve --tunnel` through
+  the cluster's login node, waits until the server answers through the tunnel, runs the command and cancels the
+  job when the command ends. `--notify` pushes its progress to ntfy.
 
 ### Changed
 

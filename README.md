@@ -64,6 +64,9 @@ SERVE_LONG_PARTITION = ...
 | `PLYSERVE_TUNNEL_BIND` | `serve --tunnel` | Address the remote machine listens on; default `127.0.0.1` |
 | `PLYSERVE_MANIFEST` | plyserve | Optional `models.toml` to read instead of the clone's, e.g. a variant for one experiment; `--manifest` wins |
 | `PLYSERVE_REPO` | `slurm/serve_model.sbatch` | The clone, if the job is not submitted from it |
+| `PLYSERVE_REMOTE` | `remote` | Required for it. SSH destination of the cluster's login node |
+| `PLYSERVE_REMOTE_REPO` | `remote` | Required for it. The plyserve clone on the cluster, a literal path |
+| `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` | `remote --notify` | ntfy server, topic and optional token, as in the other ply repositories |
 | `HF_TOKEN`, `HF_XET_*` | downloads | Passed to the Hugging Face CLI |
 
 They come from `.env` in the clone or from the environment; the environment wins. A client sees only:
@@ -138,6 +141,20 @@ Setup on the client machine, once:
    and fails, because of `/bin/false`; the host key is saved).
 
 Anyone on the client machine can reach `127.0.0.1:<tunnel_port>`, so the API key protects the server there too.
+
+`plyserve remote` runs all of mode 3 from the client machine, in a clone of plyserve there. It submits
+`make serve-job ARGS='--tunnel <model>'` through the cluster's login node (`PLYSERVE_REMOTE`, in the clone
+`PLYSERVE_REMOTE_REPO`), waits until the server answers at the tunnel port, runs the command with `VLLM_*` set, and
+cancels the job when the command ends, fails or is stopped with Ctrl-C:
+
+```bash
+plyserve remote --notify --monitor --remote-manifest /shared/exp/models.toml qwen-3.8-27b-fp8 -- uv run python -u bench.py
+```
+
+It checks the job's state with `squeue` every 30 s (one SSH login each) and stops if the job ends before the
+server answers. `--length long` takes the long partition, `--remote-manifest` sets `PLYSERVE_MANIFEST` for the job,
+and `--notify` pushes when the job starts, when the server answers and when the command ends or fails. The model's
+`tunnel_port` must be the same in both manifests. The SSH connection to the login node must work without a prompt.
 
 Without a client command, `serve` runs until vLLM exits or the job ends. Every run writes `server.json` to
 `$PLYSERVE_HOME/runs/<job id>-<model>/`: model, revision, vLLM arguments and environment, package versions,
