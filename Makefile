@@ -57,7 +57,7 @@ download:
 
 # Interactive shells on Slurm compute nodes, for trying things out by hand. Run them on the login node.
 # Every value can be overridden: make gpu-serve TIME=0:30:00 MEM=128G
-# The partitions are site settings: set CPU_PARTITION, GPU_PARTITION, SERVE_PARTITION and SERVE_LONG_PARTITION in local.mk
+# The partitions are site settings: set CPU_PARTITION, GPU_PARTITION and the SERVE_*PARTITION of serve-job below in local.mk
 # (gitignored; docs/ has the values for known clusters). An empty one leaves the choice to Slurm.
 -include local.mk
 TIME ?= 1:00:00
@@ -86,16 +86,21 @@ gpu-serve:
 	srun $(if $(PARTITION),-p $(PARTITION)) -t $(TIME) -c $(CPUS) --mem=$(MEM) --gres=gpu:$(GPUS) --pty bash -i
 
 # A batch job of slurm/serve_model.sbatch; ARGS are those of `plyserve serve`. LENGTH picks the partition and time:
-#   short: SERVE_PARTITION, 4 hours (tests, throughput checks); long: SERVE_LONG_PARTITION, 3 days (full runs)
+#   short: SERVE_PARTITION, 4 hours (tests, throughput checks); day: SERVE_DAY_PARTITION, 1 day;
+#   long: SERVE_LONG_PARTITION, 3 days (full runs); extralong: SERVE_EXTRALONG_PARTITION, 21 days
 #   make serve-job LENGTH=long ARGS='qwen-3.8-27b-fp8 -- uv run --directory ../client python -u run.py'
-# A client command runs in this directory, hence `uv run --directory`. Override the time with JOB_TIME=1-00:00:00
+# A client command runs in this directory, hence `uv run --directory`. Override the time, up to the partition's limit, with JOB_TIME=10:00:00
 SERVE_PARTITION_short = $(SERVE_PARTITION)
+SERVE_PARTITION_day = $(SERVE_DAY_PARTITION)
 SERVE_PARTITION_long = $(SERVE_LONG_PARTITION)
+SERVE_PARTITION_extralong = $(SERVE_EXTRALONG_PARTITION)
 JOB_TIME_short = 4:00:00
+JOB_TIME_day = 1-00:00:00
 JOB_TIME_long = 3-00:00:00
+JOB_TIME_extralong = 21-00:00:00
 serve-job: LENGTH ?= short
 serve-job: JOB_TIME ?= $(JOB_TIME_$(LENGTH))
 serve-job:
-	@case "$(LENGTH)" in short|long) ;; *) echo "LENGTH must be short or long, not '$(LENGTH)'" >&2; exit 1;; esac
-	@test -n "$(ARGS)" || (echo "usage: make serve-job LENGTH=short|long ARGS='[--expose] [--tunnel] <model> [-- client command...]'" >&2; exit 1)
+	@case "$(LENGTH)" in short|day|long|extralong) ;; *) echo "LENGTH must be short, day, long or extralong, not '$(LENGTH)'" >&2; exit 1;; esac
+	@test -n "$(ARGS)" || (echo "usage: make serve-job LENGTH=short|day|long|extralong [JOB_TIME=...] ARGS='[--expose] [--tunnel] <model> [-- client command...]'" >&2; exit 1)
 	sbatch $(if $(SERVE_PARTITION_$(LENGTH)),-p $(SERVE_PARTITION_$(LENGTH))) -t $(JOB_TIME) slurm/serve_model.sbatch $(ARGS)

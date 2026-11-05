@@ -40,7 +40,9 @@ In `local.mk` (the `*fast` partitions have the shortest queues):
 CPU_PARTITION = cpufast
 GPU_PARTITION = gpufast
 SERVE_PARTITION = h200fast
+SERVE_DAY_PARTITION = h200
 SERVE_LONG_PARTITION = h200long
+SERVE_EXTRALONG_PARTITION = h200extralong
 ```
 
 In `slurm/site.sh`:
@@ -57,9 +59,18 @@ Batch jobs need the partition on the command line (or `export SBATCH_PARTITION=h
 sbatch -p h200fast slurm/serve_model.sbatch qwen-3.8-27b-fp8 -- uv run --project ~/classifier python classify.py
 ```
 
-`h200fast` is the short-queue partition. Longer runs go to `h200`, `h200long` or `h200extralong` with a matching
-`-t`; `make serve-job LENGTH=long` uses `h200long` for 3 days. The time limits of the partitions are not recorded
-here yet (`sinfo -o "%P %l"`). In client jobs of mode 2, the endpoint command is
+The H200 partitions (h01-h03, 8 GPUs and 124 CPUs per node; from RCI's partition table, 2026-11-05) and the
+`make serve-job` / `plyserve remote --length` that takes each:
+
+| Partition | Time limit | `LENGTH` |
+|---|---|---|
+| `h200fast` | 4 hours | `short` |
+| `h200` | 24 hours | `day` |
+| `h200long` | 72 hours | `long` |
+| `h200extralong` | 504 hours (21 days) | `extralong` |
+
+`h200fast` has the shortest queue. `JOB_TIME=10:00:00` (`--time` of `plyserve remote`) asks for less than the
+limit, which can start a job sooner. In client jobs of mode 2, the endpoint command is
 `/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait <model>`.
 
 ## Results

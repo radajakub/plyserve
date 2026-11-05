@@ -150,6 +150,8 @@ def test_options_reach_make_serve_job() -> None:
         "-lc",
         "cd /shared/me/plyserve && PLYSERVE_MANIFEST='/shared/me/exp/models mtp.toml' make serve-job LENGTH=long ARGS='--tunnel --monitor m-fp8'",
     ]
+    command = submit_command("/shared/me/plyserve", "m-fp8", "day", False, None, "10:00:00")
+    assert shlex.split(command)[-1] == "cd /shared/me/plyserve && make serve-job LENGTH=day JOB_TIME=10:00:00 ARGS='--tunnel m-fp8'"
 
 
 def test_job_that_ends_before_the_server_answers(fake: Path, tunnel: int, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,10 +336,29 @@ def test_cli_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("plyserve.cli.remote", lambda spec, command, **kwargs: calls.append((command, kwargs)) or 0)
     monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _spec(18001)})
     with pytest.raises(SystemExit):
-        main(["remote", "--length", "long", "--monitor", "--remote-manifest", "/x/models.toml", "--notify", "m-fp8", "--", "uv", "run", "bench.py", "--levels", "64"])
+        main(
+            [
+                "remote",
+                "--length",
+                "day",
+                "--time",
+                "10:00:00",
+                "--monitor",
+                "--remote-manifest",
+                "/x/models.toml",
+                "--notify",
+                "m-fp8",
+                "--",
+                "uv",
+                "run",
+                "bench.py",
+                "--levels",
+                "64",
+            ]
+        )
     command, kwargs = calls[0]
     assert command == ["uv", "run", "bench.py", "--levels", "64"]
-    assert kwargs == {"length": "long", "monitor": True, "manifest": "/x/models.toml", "timeout": 3600.0, "notify": True, "fetch_files": False}
+    assert kwargs == {"length": "day", "time": "10:00:00", "monitor": True, "manifest": "/x/models.toml", "timeout": 3600.0, "notify": True, "fetch_files": False}
 
 
 def test_cli_remote_needs_a_command(monkeypatch: pytest.MonkeyPatch) -> None:

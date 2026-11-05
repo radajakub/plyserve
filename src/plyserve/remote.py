@@ -44,12 +44,13 @@ def _ssh(env: dict[str, str], target: str, command: str) -> subprocess.Completed
     return _run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", target, command], env, SSH_TIMEOUT)
 
 
-def submit_command(repo: str, model: str, length: str, monitor: bool, manifest: str | None) -> str:
-    # `make serve-job` in the cluster's clone, so the job gets the partition and time from its local.mk; PLYSERVE_MANIFEST reaches the job through sbatch.
+def submit_command(repo: str, model: str, length: str, monitor: bool, manifest: str | None, time: str | None = None) -> str:
+    # `make serve-job` in the cluster's clone, so the job gets the partition and time from its local.mk (`time` overrides the latter); PLYSERVE_MANIFEST reaches the job through sbatch.
     # In a login shell: sbatch hands the job the submitting environment, and slurm/site.sh needs what a login sets up there (e.g. Lmod's `module` function)
     args = shlex.join(["--tunnel", *(["--monitor"] if monitor else []), model])
     prefix = f"PLYSERVE_MANIFEST={shlex.quote(manifest)} " if manifest else ""
-    return shlex.join(["bash", "-lc", f"cd {shlex.quote(repo)} && {prefix}make serve-job LENGTH={length} ARGS={shlex.quote(args)}"])
+    job_time = f" JOB_TIME={shlex.quote(time)}" if time else ""
+    return shlex.join(["bash", "-lc", f"cd {shlex.quote(repo)} && {prefix}make serve-job LENGTH={length}{job_time} ARGS={shlex.quote(args)}"])
 
 
 def job_state(env: dict[str, str], target: str, job: str) -> str | None:
@@ -132,6 +133,7 @@ def remote(
     command: Sequence[str],
     *,
     length: str = "short",
+    time: str | None = None,
     monitor: bool = False,
     manifest: str | None = None,
     timeout: float = 3600.0,
@@ -140,7 +142,7 @@ def remote(
 ) -> int:
     # On the client machine (mode 3): submits `serve --tunnel` as a job through the cluster's login node, waits until the server answers through the tunnel,
     # runs `command` against it and cancels the job when the command ends, fails or plyserve is stopped. Returns the exit code of the command.
-    # `manifest` is a models.toml on the cluster for the job (PLYSERVE_MANIFEST there); `notify` pushes when the job runs, the server answers and the command ends;
+    # `time` replaces the time limit of `length`; `manifest` is a models.toml on the cluster for the job (PLYSERVE_MANIFEST there); `notify` pushes when the job runs, the server answers and the command ends;
     # `fetch_files` copies the job's run folder and log to FETCH_DIR once the job has ended
     env = environment()
     target, repo, key = env.get("PLYSERVE_REMOTE"), env.get("PLYSERVE_REMOTE_REPO"), env.get("PLYSERVE_API_KEY")
@@ -165,7 +167,7 @@ def remote(
     previous = {name: signal.signal(name, _on_signal) for name in (signal.SIGTERM, signal.SIGINT)}
     job = None
     try:
-        submitted = _ssh(env, target, submit_command(repo, spec.name, length, monitor, manifest))
+        submitted = _ssh(env, target, submit_command(repo, spec.name, length, monitor, manifest, time))
         print(submitted.stdout + submitted.stderr, end="", flush=True)
         if (found := re.search(r"Submitted batch job (\d+)", submitted.stdout)) is None:
             raise RuntimeError(f"`make serve-job` on {target} submitted no job (exit code {submitted.returncode}); its output is above")

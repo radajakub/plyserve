@@ -41,7 +41,17 @@ def _remote(args: argparse.Namespace) -> None:
     if not command:
         raise SystemExit("usage: plyserve remote [options] <model> -- <command...>")
     raise SystemExit(
-        remote(_model(args), command, length=args.length, monitor=args.monitor, manifest=args.remote_manifest, timeout=args.timeout, notify=args.notify, fetch_files=args.fetch)
+        remote(
+            _model(args),
+            command,
+            length=args.length,
+            time=args.time,
+            monitor=args.monitor,
+            manifest=args.remote_manifest,
+            timeout=args.timeout,
+            notify=args.notify,
+            fetch_files=args.fetch,
+        )
     )
 
 
@@ -84,7 +94,10 @@ def main(argv: list[str] | None = None) -> None:
         "remote", help="on the client machine: run `serve --tunnel` as a job on the cluster, run a command against it, then cancel the job (see PLYSERVE_REMOTE in .env.example)"
     )
     remote_parser.add_argument("model", help="served name from the manifest; its tunnel_port must be the same in the cluster's manifest")
-    remote_parser.add_argument("--length", choices=("short", "long"), default="short", help="the job's partition and time limit, as LENGTH of `make serve-job` (default: short)")
+    remote_parser.add_argument(
+        "--length", choices=("short", "day", "long", "extralong"), default="short", help="the job's partition and time limit, as LENGTH of `make serve-job` (default: short)"
+    )
+    remote_parser.add_argument("--time", help="the job's time limit in Slurm's format (e.g. 10:00:00) instead of the one of --length, as JOB_TIME of `make serve-job`")
     remote_parser.add_argument("--monitor", action="store_true", help="pass --monitor to serve: GPU and CPU samples in the run folder on the cluster")
     remote_parser.add_argument("--remote-manifest", help="models.toml on the cluster for the job, as PLYSERVE_MANIFEST there (default: the cluster's own setting)")
     remote_parser.add_argument("--timeout", type=float, default=3600.0, help="seconds to wait for the server once the job runs (default: 3600)")

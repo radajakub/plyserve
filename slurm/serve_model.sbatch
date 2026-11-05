@@ -5,7 +5,7 @@
 # The resources below fit one ~30B FP8 model on one GPU. Choose the partition (and override anything else) on
 # the command line or through Slurm's SBATCH_* variables: sbatch -p <partition> -t 1-00:00:00 slurm/serve_model.sbatch ...
 # Submit from the plyserve clone, or set PLYSERVE_REPO to it. A client command runs in the submit directory.
-# From the clone, `make serve-job LENGTH=short|long ARGS='...'` picks the partition and time from local.mk.
+# From the clone, `make serve-job LENGTH=short|day|long|extralong ARGS='...'` picks the partition and time from local.mk.
 #SBATCH --job-name=plyserve
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16

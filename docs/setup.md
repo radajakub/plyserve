@@ -72,14 +72,16 @@ internet access. Below, `<shared>` is your folder on the shared storage.
    `PLYSERVE_EXPOSE_HOST`.
 
    In `local.mk`, the partitions for `make cpu`, `make gpu`, `make gpu-serve` and `make serve-job`. Short-queue
-   partitions are best, except `SERVE_LONG_PARTITION`, which takes multi-day jobs. An empty value leaves the choice
+   partitions are best, except the longer `SERVE_*_PARTITION`s of `make serve-job`. An empty value leaves the choice
    to Slurm:
 
    ```make
    CPU_PARTITION = <a CPU partition>
    GPU_PARTITION = <any GPU partition>
    SERVE_PARTITION = <the partition with the GPU you serve on>
+   SERVE_DAY_PARTITION = <the same GPU, for jobs of up to 1 day>
    SERVE_LONG_PARTITION = <the same GPU, for jobs of up to 3 days>
+   SERVE_EXTRALONG_PARTITION = <the same GPU, for jobs of up to 21 days>
    ```
 
    In `slurm/site.sh`, the commands that put the CUDA toolkit and the compiler on `PATH`. `slurm/serve_model.sbatch`
@@ -161,8 +163,9 @@ sbatch -p <serve partition> slurm/serve_model.sbatch --tunnel qwen-3.8-27b-fp8
 ```
 
 `slurm/serve_model.sbatch` asks for 1 GPU, 16 CPUs, 64 GB of memory and 4 hours. Override them on the command line
-(e.g. `-t 1-00:00:00`), or submit through `make serve-job LENGTH=short|long ARGS='...'`: `short` is
-`SERVE_PARTITION` for 4 hours, `long` is `SERVE_LONG_PARTITION` for 3 days, `JOB_TIME=...` overrides the time.
+(e.g. `-t 1-00:00:00`), or submit through `make serve-job LENGTH=short|day|long|extralong ARGS='...'`: `short` is
+`SERVE_PARTITION` for 4 hours, `day` is `SERVE_DAY_PARTITION` for 1 day, `long` is `SERVE_LONG_PARTITION` for 3 days,
+`extralong` is `SERVE_EXTRALONG_PARTITION` for 21 days; `JOB_TIME=...` overrides the time.
 A client command runs in the plyserve clone, so give it its own directory (`uv run --directory <client> ...`).
 Job logs go to `plyserve-<job id>.out` in the submit directory. Run records go to
 `$PLYSERVE_HOME/runs/<job id>-<model>/server.json`.

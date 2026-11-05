@@ -10,6 +10,8 @@ All notable changes to this project are documented in this file. The format is b
 
 - `make serve-job LENGTH=short|long ARGS='...'` submits `slurm/serve_model.sbatch` with the partition and time for
   its length: `SERVE_PARTITION` for 4 hours, or the new `SERVE_LONG_PARTITION` (`local.mk`) for 3 days.
+- `LENGTH=day` (`SERVE_DAY_PARTITION`, 1 day) and `LENGTH=extralong` (`SERVE_EXTRALONG_PARTITION`, 21 days), also
+  as `plyserve remote --length`; `plyserve remote --time` sets the job's time limit (`JOB_TIME`).
 - `PLYSERVE_MANIFEST` (environment or `.env`) names the `models.toml` to read when `--manifest` is not given, so a
   batch job (`make serve-job`) can serve a variant of a model kept outside the clone.
 - `serve --monitor` samples the GPU (nvidia-smi; DCGM's SM, tensor and DRAM activity where installed) and the CPU
