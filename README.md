@@ -41,16 +41,21 @@ environment modules, for example:
 module load CUDA/12.9.1 GCC/13.3.0
 ```
 
-Optional: a `local.mk` with your cluster's partitions for the interactive `make cpu`, `make gpu` and
-`make gpu-serve` shells, and for batch jobs through `make serve-job`:
+Optional: your cluster's partitions. For batch jobs through `plyserve job` (and `make serve-job`, `plyserve remote`) and
+the `make gpu-serve` shell, in `.env`:
+
+```bash
+PLYSERVE_PARTITION_SHORT=...
+PLYSERVE_PARTITION_DAY=...
+PLYSERVE_PARTITION_LONG=...
+PLYSERVE_PARTITION_EXTRALONG=...
+```
+
+For the interactive `make cpu` and `make gpu` shells, in a `local.mk`:
 
 ```make
 CPU_PARTITION = ...
 GPU_PARTITION = ...
-SERVE_PARTITION = ...
-SERVE_DAY_PARTITION = ...
-SERVE_LONG_PARTITION = ...
-SERVE_EXTRALONG_PARTITION = ...
 ```
 
 ## Configuration (the contract)
@@ -145,7 +150,7 @@ Setup on the client machine, once:
 Anyone on the client machine can reach `127.0.0.1:<tunnel_port>`, so the API key protects the server there too.
 
 `plyserve remote` runs all of mode 3 from the client machine, in a clone of plyserve there. It submits
-`make serve-job ARGS='--tunnel <model>'` through the cluster's login node (`PLYSERVE_REMOTE`, in the clone
+`plyserve job -- --tunnel <model>` through the cluster's login node (`PLYSERVE_REMOTE`, in the clone
 `PLYSERVE_REMOTE_REPO`), waits until the server answers at the tunnel port, runs the command with `VLLM_*` set, and
 cancels the job when the command ends, fails or is stopped with Ctrl-C:
 
@@ -154,7 +159,7 @@ plyserve remote --notify --monitor --remote-manifest /shared/exp/models.toml qwe
 ```
 
 It checks the job's state with `squeue` every 30 s (one SSH login each) and stops if the job ends before the
-server answers. `--length day|long|extralong` takes a longer partition (see `make serve-job`), `--time 10:00:00` sets the job's time limit, `--remote-manifest` sets `PLYSERVE_MANIFEST` for the job,
+server answers. `--length day|long|extralong` takes a longer partition (see `plyserve job`), `--time 10:00:00` sets the job's time limit, `--remote-manifest` sets `PLYSERVE_MANIFEST` for the job,
 `--notify` pushes when the job starts, when the server answers and when the command ends or fails, and `--fetch`
 copies the job's run folder and `plyserve-<job id>.out` into `runs/<job id>-<model>/` of this clone (gitignored)
 once the job has left the queue; it never overwrites a folder that exists. The model's

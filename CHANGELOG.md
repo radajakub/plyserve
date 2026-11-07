@@ -8,10 +8,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- `make serve-job LENGTH=short|long ARGS='...'` submits `slurm/serve_model.sbatch` with the partition and time for
-  its length: `SERVE_PARTITION` for 4 hours, or the new `SERVE_LONG_PARTITION` (`local.mk`) for 3 days.
-- `LENGTH=day` (`SERVE_DAY_PARTITION`, 1 day) and `LENGTH=extralong` (`SERVE_EXTRALONG_PARTITION`, 21 days), also
-  as `plyserve remote --length`; `plyserve remote --time` sets the job's time limit (`JOB_TIME`).
+- `plyserve job --length short|day|long|extralong [--time ...] -- <serve arguments>` submits
+  `slurm/serve_model.sbatch` from the clone with the partition and time of its length: `PLYSERVE_PARTITION_SHORT`,
+  `_DAY`, `_LONG`, `_EXTRALONG` (`.env`), and the time limit `PLYSERVE_TIME_*` (default 4 hours, 1 day, 3 days, 21
+  days, RCI's limits); `--time` sets the time limit of one job.
+  `make serve-job LENGTH=... [JOB_TIME=...] ARGS='...'` and `plyserve remote --length/--time` call it.
+  `plyserve partition <length>` prints a partition (`make gpu-serve` takes the short one).
+- `plyserve.remote` as a library: `submit`, `wait_until_ready`, `job_state` and `cancel`, the steps of `remote`, for
+  tools that keep a model served (plyservice).
 - `PLYSERVE_MANIFEST` (environment or `.env`) names the `models.toml` to read when `--manifest` is not given, so a
   batch job (`make serve-job`) can serve a variant of a model kept outside the clone.
 - `serve --monitor` samples the GPU (nvidia-smi; DCGM's SM, tensor and DRAM activity where installed) and the CPU
@@ -26,6 +30,9 @@ All notable changes to this project are documented in this file. The format is b
 ### Changed
 
 - `slurm/serve.sbatch` is renamed to `slurm/serve_model.sbatch`.
+- The serve partitions are in `.env` (`PLYSERVE_PARTITION_*`), not in `local.mk` (`SERVE_*PARTITION`), which keeps
+  `CPU_PARTITION` and `GPU_PARTITION` of the interactive shells. A `local.mk` that still names a serve partition stops
+  `plyserve job` with a message, so a job never lands on Slurm's default partition unnoticed.
 
 ## [0.2.0] - 2026-10-16
 

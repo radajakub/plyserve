@@ -5,6 +5,7 @@ from pathlib import Path
 
 from plyserve.download import download
 from plyserve.endpoint import find_endpoint, shell_exports
+from plyserve.job import LENGTHS, partition, submit_job
 from plyserve.manifest import ModelSpec, default_manifest, load_manifest
 from plyserve.remote import remote
 from plyserve.serve import serve
@@ -55,6 +56,15 @@ def _remote(args: argparse.Namespace) -> None:
     )
 
 
+def _job(args: argparse.Namespace) -> None:
+    raise SystemExit(submit_job(_command(args), length=args.length, time=args.time))
+
+
+def _partition(args: argparse.Namespace) -> None:
+    # empty when not set: `make gpu-serve` then leaves the choice to Slurm
+    print(partition(args.length) or "")
+
+
 def _endpoint(args: argparse.Namespace) -> None:
     spec = _model(args)
     print(shell_exports(find_endpoint(spec.name, wait=args.wait, timeout=args.timeout), spec.backend))
@@ -90,14 +100,29 @@ def main(argv: list[str] | None = None) -> None:
     )
     serve_parser.set_defaults(run=_serve)
 
+    job_parser = commands.add_parser("job", help="submit `serve` as a Slurm batch job from this clone, on the partition of --length (PLYSERVE_PARTITION_* in .env)")
+    job_parser.add_argument(
+        "--length",
+        choices=tuple(LENGTHS),
+        default="short",
+        help="the partition and time limit (PLYSERVE_PARTITION_* and PLYSERVE_TIME_* in .env; default times: short 4 h, day 1 day, long 3 days, extralong 21 days)",
+    )
+    job_parser.add_argument("--time", help="the time limit in Slurm's format (e.g. 10:00:00) instead of the one of --length")
+    job_parser.add_argument("client", nargs=argparse.REMAINDER, metavar="serve_args", help="after --: the arguments of `plyserve serve`, e.g. -- --tunnel qwen-3.8-27b-fp8")
+    job_parser.set_defaults(run=_job)
+
+    partition_parser = commands.add_parser("partition", help="print the partition of a length (PLYSERVE_PARTITION_* in .env), empty when not set")
+    partition_parser.add_argument("length", choices=tuple(LENGTHS))
+    partition_parser.set_defaults(run=_partition)
+
     remote_parser = commands.add_parser(
         "remote", help="on the client machine: run `serve --tunnel` as a job on the cluster, run a command against it, then cancel the job (see PLYSERVE_REMOTE in .env.example)"
     )
     remote_parser.add_argument("model", help="served name from the manifest; its tunnel_port must be the same in the cluster's manifest")
     remote_parser.add_argument(
-        "--length", choices=("short", "day", "long", "extralong"), default="short", help="the job's partition and time limit, as LENGTH of `make serve-job` (default: short)"
+        "--length", choices=("short", "day", "long", "extralong"), default="short", help="the job's partition and time limit, as --length of `plyserve job` (default: short)"
     )
-    remote_parser.add_argument("--time", help="the job's time limit in Slurm's format (e.g. 10:00:00) instead of the one of --length, as JOB_TIME of `make serve-job`")
+    remote_parser.add_argument("--time", help="the job's time limit in Slurm's format (e.g. 10:00:00) instead of the one of --length, as --time of `plyserve job`")
     remote_parser.add_argument("--monitor", action="store_true", help="pass --monitor to serve: GPU and CPU samples in the run folder on the cluster")
     remote_parser.add_argument("--remote-manifest", help="models.toml on the cluster for the job, as PLYSERVE_MANIFEST there (default: the cluster's own setting)")
     remote_parser.add_argument("--timeout", type=float, default=3600.0, help="seconds to wait for the server once the job runs (default: 3600)")

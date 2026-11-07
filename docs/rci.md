@@ -32,6 +32,10 @@ In `.env`:
 ```bash
 PLYSERVE_HOME=/mnt/personal/$USER/plyserve-home
 HF_XET_HIGH_PERFORMANCE=1
+PLYSERVE_PARTITION_SHORT=h200fast
+PLYSERVE_PARTITION_DAY=h200
+PLYSERVE_PARTITION_LONG=h200long
+PLYSERVE_PARTITION_EXTRALONG=h200extralong
 ```
 
 In `local.mk` (the `*fast` partitions have the shortest queues):
@@ -39,10 +43,6 @@ In `local.mk` (the `*fast` partitions have the shortest queues):
 ```make
 CPU_PARTITION = cpufast
 GPU_PARTITION = gpufast
-SERVE_PARTITION = h200fast
-SERVE_DAY_PARTITION = h200
-SERVE_LONG_PARTITION = h200long
-SERVE_EXTRALONG_PARTITION = h200extralong
 ```
 
 In `slurm/site.sh`:
@@ -60,16 +60,16 @@ sbatch -p h200fast slurm/serve_model.sbatch qwen-3.8-27b-fp8 -- uv run --project
 ```
 
 The H200 partitions (h01-h03, 8 GPUs and 124 CPUs per node; from RCI's partition table, 2026-11-05) and the
-`make serve-job` / `plyserve remote --length` that takes each:
+`plyserve job` / `plyserve remote --length` that takes each:
 
-| Partition | Time limit | `LENGTH` |
+| Partition | Time limit | `--length` |
 |---|---|---|
 | `h200fast` | 4 hours | `short` |
 | `h200` | 24 hours | `day` |
 | `h200long` | 72 hours | `long` |
 | `h200extralong` | 504 hours (21 days) | `extralong` |
 
-`h200fast` has the shortest queue. `JOB_TIME=10:00:00` (`--time` of `plyserve remote`) asks for less than the
+`h200fast` has the shortest queue. `--time 10:00:00` (of `plyserve job` and `plyserve remote`) asks for less than the
 limit, which can start a job sooner. In client jobs of mode 2, the endpoint command is
 `/mnt/personal/$USER/plyserve/.venv/bin/plyserve endpoint --wait <model>`.
 

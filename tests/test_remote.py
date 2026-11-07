@@ -16,7 +16,7 @@ from plyserve.cli import main
 from plyserve.manifest import ModelSpec
 from plyserve.remote import remote, submit_command
 
-# stands in for ssh to the login node: records each remote command in FAKE_REMOTE_RECORD and answers it. `make serve-job` submits job 42 (FAKE_SUBMIT_FAIL: no job);
+# stands in for ssh to the login node: records each remote command in FAKE_REMOTE_RECORD and answers it. `plyserve job` submits job 42 (FAKE_SUBMIT_FAIL: no job);
 # squeue prints the next of the comma-separated FAKE_STATES (the last one repeats; SSHFAIL exits 255 as a failed connection) and, at RUNNING, starts the
 # server behind the tunnel by creating FAKE_READY (unless FAKE_NEVER_READY); after scancel the job has left the queue; scancel exits with FAKE_SCANCEL_CODE.
 # The cluster's PLYSERVE_HOME resolves to FAKE_REMOTE_HOME
@@ -27,7 +27,7 @@ record = os.environ["FAKE_REMOTE_RECORD"]
 calls = [json.loads(line) for line in open(record)] if os.path.exists(record) else []
 with open(record, "a") as handle:
     handle.write(json.dumps({"argv": sys.argv[1:]}) + "\\n")
-if "make serve-job" in command:
+if "plyserve job" in command:
     print("sbatch -p h200fast -t 4:00:00 slurm/serve_model.sbatch ...")
     if "FAKE_SUBMIT_FAIL" in os.environ:
         print("sbatch: error: invalid partition", file=sys.stderr)
@@ -133,7 +133,7 @@ def test_submits_waits_runs_the_command_and_cancels(fake: Path, tunnel: int, mon
     assert remote(_spec(tunnel), [sys.executable, "-c", _CLIENT, str(out)]) == 3
 
     commands = _commands(fake)
-    assert shlex.split(commands[0]) == ["bash", "-lc", "cd /shared/me/plyserve && make serve-job LENGTH=short ARGS='--tunnel m-fp8'"]
+    assert shlex.split(commands[0]) == ["bash", "-lc", "cd /shared/me/plyserve && .venv/bin/plyserve job --length short -- --tunnel m-fp8"]
     assert commands[1:-1] == ["squeue -h -j 42 -o %T"] * 3
     assert commands[-1] == "scancel 42"
     argv = json.loads((fake / "ssh.jsonl").read_text().splitlines()[0])["argv"]
@@ -142,16 +142,16 @@ def test_submits_waits_runs_the_command_and_cancels(fake: Path, tunnel: int, mon
     assert json.loads(out.read_text()) == {"VLLM_BASE_URL": f"http://127.0.0.1:{tunnel}/v1", "VLLM_API_KEY": "fixed-key", "VLLM_MODEL": "m-fp8"}
 
 
-def test_options_reach_make_serve_job() -> None:
+def test_options_reach_plyserve_job() -> None:
     command = submit_command("/shared/me/plyserve", "m-fp8", "long", True, "/shared/me/exp/models mtp.toml")
     # in a login shell on the login node, so the job gets what slurm/site.sh needs from it
     assert shlex.split(command) == [
         "bash",
         "-lc",
-        "cd /shared/me/plyserve && PLYSERVE_MANIFEST='/shared/me/exp/models mtp.toml' make serve-job LENGTH=long ARGS='--tunnel --monitor m-fp8'",
+        "cd /shared/me/plyserve && PLYSERVE_MANIFEST='/shared/me/exp/models mtp.toml' .venv/bin/plyserve job --length long -- --tunnel --monitor m-fp8",
     ]
     command = submit_command("/shared/me/plyserve", "m-fp8", "day", False, None, "10:00:00")
-    assert shlex.split(command)[-1] == "cd /shared/me/plyserve && make serve-job LENGTH=day JOB_TIME=10:00:00 ARGS='--tunnel m-fp8'"
+    assert shlex.split(command)[-1] == "cd /shared/me/plyserve && .venv/bin/plyserve job --length day --time 10:00:00 -- --tunnel m-fp8"
 
 
 def test_job_that_ends_before_the_server_answers(fake: Path, tunnel: int, monkeypatch: pytest.MonkeyPatch) -> None:

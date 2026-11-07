@@ -71,17 +71,24 @@ internet access. Below, `<shared>` is your folder on the shared storage.
    If the nodes reach each other only on one network (e.g. InfiniBand host names), also set
    `PLYSERVE_EXPOSE_HOST`.
 
-   In `local.mk`, the partitions for `make cpu`, `make gpu`, `make gpu-serve` and `make serve-job`. Short-queue
-   partitions are best, except the longer `SERVE_*_PARTITION`s of `make serve-job`. An empty value leaves the choice
-   to Slurm:
+   In `.env`, the partitions of `plyserve job` (also behind `make serve-job`, `plyserve remote` and the `make gpu-serve`
+   shell, which takes the short one). An empty value leaves the choice to Slurm:
+
+   ```bash
+   PLYSERVE_PARTITION_SHORT=<the partition with the GPU you serve on>
+   PLYSERVE_PARTITION_DAY=<the same GPU, for jobs of up to 1 day>
+   PLYSERVE_PARTITION_LONG=<the same GPU, for jobs of up to 3 days>
+   PLYSERVE_PARTITION_EXTRALONG=<the same GPU, for jobs of up to 21 days>
+   ```
+
+   The time limits of the lengths default to 4 hours, 1 day, 3 days and 21 days. Where a partition allows less, set
+   `PLYSERVE_TIME_SHORT`, `_DAY`, `_LONG` or `_EXTRALONG` (Slurm's format, e.g. `2-00:00:00`).
+
+   In `local.mk`, the partitions of the interactive `make cpu` and `make gpu` shells (short-queue partitions are best):
 
    ```make
    CPU_PARTITION = <a CPU partition>
    GPU_PARTITION = <any GPU partition>
-   SERVE_PARTITION = <the partition with the GPU you serve on>
-   SERVE_DAY_PARTITION = <the same GPU, for jobs of up to 1 day>
-   SERVE_LONG_PARTITION = <the same GPU, for jobs of up to 3 days>
-   SERVE_EXTRALONG_PARTITION = <the same GPU, for jobs of up to 21 days>
    ```
 
    In `slurm/site.sh`, the commands that put the CUDA toolkit and the compiler on `PATH`. `slurm/serve_model.sbatch`
@@ -163,9 +170,11 @@ sbatch -p <serve partition> slurm/serve_model.sbatch --tunnel qwen-3.8-27b-fp8
 ```
 
 `slurm/serve_model.sbatch` asks for 1 GPU, 16 CPUs, 64 GB of memory and 4 hours. Override them on the command line
-(e.g. `-t 1-00:00:00`), or submit through `make serve-job LENGTH=short|day|long|extralong ARGS='...'`: `short` is
-`SERVE_PARTITION` for 4 hours, `day` is `SERVE_DAY_PARTITION` for 1 day, `long` is `SERVE_LONG_PARTITION` for 3 days,
-`extralong` is `SERVE_EXTRALONG_PARTITION` for 21 days; `JOB_TIME=...` overrides the time.
+(e.g. `-t 1-00:00:00`), or submit through `plyserve job --length short|day|long|extralong -- <serve arguments>` (or
+`make serve-job LENGTH=... ARGS='...'`): `short` is `PLYSERVE_PARTITION_SHORT` for 4 hours, `day` is
+`PLYSERVE_PARTITION_DAY` for 1 day, `long` is `PLYSERVE_PARTITION_LONG` for 3 days, `extralong` is
+`PLYSERVE_PARTITION_EXTRALONG` for 21 days (times by default; `PLYSERVE_TIME_*` sets a site's own); `--time`
+(`JOB_TIME=...`) overrides the time of one job.
 A client command runs in the plyserve clone, so give it its own directory (`uv run --directory <client> ...`).
 Job logs go to `plyserve-<job id>.out` in the submit directory. Run records go to
 `$PLYSERVE_HOME/runs/<job id>-<model>/server.json`.

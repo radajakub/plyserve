@@ -45,12 +45,24 @@ def _ssh(env: dict[str, str], target: str, command: str) -> subprocess.Completed
 
 
 def submit_command(repo: str, model: str, length: str, monitor: bool, manifest: str | None, time: str | None = None) -> str:
-    # `make serve-job` in the cluster's clone, so the job gets the partition and time from its local.mk (`time` overrides the latter); PLYSERVE_MANIFEST reaches the job through sbatch.
+    # `plyserve job` in the cluster's clone, so the job gets the partition from its .env (`time` overrides the length's limit); PLYSERVE_MANIFEST reaches the job through sbatch.
     # In a login shell: sbatch hands the job the submitting environment, and slurm/site.sh needs what a login sets up there (e.g. Lmod's `module` function)
-    args = shlex.join(["--tunnel", *(["--monitor"] if monitor else []), model])
+    job = ["--length", length, *(["--time", time] if time else []), "--", "--tunnel", *(["--monitor"] if monitor else []), model]
     prefix = f"PLYSERVE_MANIFEST={shlex.quote(manifest)} " if manifest else ""
-    job_time = f" JOB_TIME={shlex.quote(time)}" if time else ""
-    return shlex.join(["bash", "-lc", f"cd {shlex.quote(repo)} && {prefix}make serve-job LENGTH={length}{job_time} ARGS={shlex.quote(args)}"])
+    return shlex.join(["bash", "-lc", f"cd {shlex.quote(repo)} && {prefix}.venv/bin/plyserve job {shlex.join(job)}"])
+
+
+def submit(env: dict[str, str], target: str, repo: str, model: str, length: str = "short", monitor: bool = False, manifest: str | None = None, time: str | None = None) -> str:
+    # submits `serve --tunnel` of a model as a job through the cluster's login node and returns the job's id; its output is printed
+    submitted = _ssh(env, target, submit_command(repo, model, length, monitor, manifest, time))
+    print(submitted.stdout + submitted.stderr, end="", flush=True)
+    if (found := re.search(r"Submitted batch job (\d+)", submitted.stdout)) is None:
+        raise RuntimeError(f"`plyserve job` on {target} submitted no job (exit code {submitted.returncode}); its output is above")
+    return found.group(1)
+
+
+def cancel(env: dict[str, str], target: str, job: str) -> subprocess.CompletedProcess[str]:
+    return _ssh(env, target, f"scancel {job}")
 
 
 def job_state(env: dict[str, str], target: str, job: str) -> str | None:
@@ -104,7 +116,8 @@ def fetch(env: dict[str, str], target: str, repo: str, job: str, model: str) -> 
     return local, missing
 
 
-def _wait_until_ready(env: dict[str, str], target: str, repo: str, job: str, health: str, key: str, timeout: float, say: Callable[[str, bool], None]) -> None:
+def wait_until_ready(env: dict[str, str], target: str, repo: str, job: str, health: str, key: str, timeout: float, say: Callable[[str, bool], None]) -> None:
+    # until the server answers at `health` through the tunnel; raises when the job ends first, or runs `timeout` s without an answer
     state, next_check, deadline = "", 0.0, None
     while not healthy(health, key):
         now = time.monotonic()
@@ -167,13 +180,9 @@ def remote(
     previous = {name: signal.signal(name, _on_signal) for name in (signal.SIGTERM, signal.SIGINT)}
     job = None
     try:
-        submitted = _ssh(env, target, submit_command(repo, spec.name, length, monitor, manifest, time))
-        print(submitted.stdout + submitted.stderr, end="", flush=True)
-        if (found := re.search(r"Submitted batch job (\d+)", submitted.stdout)) is None:
-            raise RuntimeError(f"`make serve-job` on {target} submitted no job (exit code {submitted.returncode}); its output is above")
-        job = found.group(1)
+        job = submit(env, target, repo, spec.name, length, monitor, manifest, time)
         say(f"job {job} submitted on {target}; its log is plyserve-{job}.out in {repo}", False)
-        _wait_until_ready(env, target, repo, job, f"{local}/health", key, timeout, say)
+        wait_until_ready(env, target, repo, job, f"{local}/health", key, timeout, say)
         say(f"the server of job {job} answers at {local}; running {shlex.join(command)}")
         try:
             client = subprocess.Popen(list(command), env=client_environment(env, f"{local}/v1", key, spec.name, spec.backend))
@@ -194,7 +203,7 @@ def remote(
         raise
     finally:
         if job is not None:
-            cancelled = _ssh(env, target, f"scancel {job}")
+            cancelled = cancel(env, target, job)
             if cancelled.returncode == 0:
                 print(f"plyserve: cancelled job {job}", flush=True)
             else:
