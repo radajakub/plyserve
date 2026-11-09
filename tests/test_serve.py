@@ -23,7 +23,8 @@ from plyserve.serve import addresses, client_environment, serve
 _SPEC = ModelSpec("m-fp8", "org/model", "abc123", 18001, ("--max-model-len", "1024"))
 
 # stands in for the runtime's vllm: answers /health and an authenticated /v1/models, and records what it got.
-# FAKE_HEALTH_DELAY delays readiness, FAKE_EXIT exits before listening, FAKE_LIFETIME exits after serving that long
+# FAKE_HEALTH_DELAY delays readiness, FAKE_EXIT exits before listening, FAKE_LIFETIME exits that long after its first ready /health (counted from then,
+# not from its start: plyserve polls every POLL_INTERVAL, so a lifetime from the start could end before a poll ever saw it ready)
 _FAKE_VLLM = """
 import http.server, json, os, sys, threading, time
 
@@ -35,11 +36,16 @@ with open(os.environ["FAKE_RECORD"], "w") as record:
 if "FAKE_EXIT" in os.environ:
     sys.exit(int(os.environ["FAKE_EXIT"]))
 ready_at = time.monotonic() + float(os.environ.get("FAKE_HEALTH_DELAY", "0"))
+dying = []
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200 if time.monotonic() >= ready_at else 503)
+            ready = time.monotonic() >= ready_at
+            if ready and "FAKE_LIFETIME" in os.environ and not dying:
+                dying.append(threading.Timer(float(os.environ["FAKE_LIFETIME"]), lambda: os._exit(0)))
+                dying[0].start()
+            self.send_response(200 if ready else 503)
         elif self.path == "/v1/models":
             self.send_response(200 if self.headers.get("Authorization") == f"Bearer {key}" else 401)
         else:
@@ -50,8 +56,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 server = http.server.HTTPServer((args[args.index("--host") + 1], port), Handler)
-if "FAKE_LIFETIME" in os.environ:
-    threading.Timer(float(os.environ["FAKE_LIFETIME"]), lambda: os._exit(0)).start()
 server.serve_forever()
 """
 

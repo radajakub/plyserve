@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# The forced command of a key that may only drive `plyserve remote` (plyservice's key on kamino): in ~/.ssh/authorized_keys on the cluster,
+#   command="<this clone>/scripts/rci-ssh-guard <this clone>",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... plyservice
+# It runs only the three commands `remote` sends (remote.py: submit_command, job_state, cancel), each rebuilt from its checked parts rather than the
+# string it was sent; anything else, a shell, scp or sftp (so `remote --fetch` too), is refused.
+set -euo pipefail
+
+repo=${1:?usage: rci-ssh-guard <plyserve clone>}
+command=${SSH_ORIGINAL_COMMAND:-}
+name='[A-Za-z0-9][A-Za-z0-9._-]*'
+submit="^bash -lc 'cd ${repo//./\\.} && \\.venv/bin/plyserve job --length (short|day|long|extralong)( --time ([0-9]+-)?[0-9]+(:[0-9]{2}){0,2})? -- --tunnel( --monitor)? (${name})'\$"
+
+if [[ $command =~ ^squeue\ -h\ -j\ ([0-9]+)\ -o\ %T$ ]]; then
+    exec squeue -h -j "${BASH_REMATCH[1]}" -o %T
+elif [[ $command =~ ^scancel\ ([0-9]+)$ ]]; then
+    exec scancel "${BASH_REMATCH[1]}"
+elif [[ $command =~ $submit ]]; then
+    length=${BASH_REMATCH[1]} time=${BASH_REMATCH[2]# --time } monitor=${BASH_REMATCH[5]} model=${BASH_REMATCH[6]}
+    exec bash -lc "cd \"\$0\" && .venv/bin/plyserve job --length $length${time:+ --time $time} -- --tunnel$monitor $model" "$repo"
+fi
+echo "rci-ssh-guard: refused: ${command:-an interactive login}" >&2
+exit 1

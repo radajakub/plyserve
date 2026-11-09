@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
@@ -365,3 +366,49 @@ def test_cli_remote_needs_a_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("plyserve.cli.load_manifest", lambda path: {"m-fp8": _spec(18001)})
     with pytest.raises(SystemExit, match="usage: plyserve remote"):
         main(["remote", "m-fp8"])
+
+
+GUARD = Path(__file__).parent.parent / "scripts" / "rci-ssh-guard"
+
+
+def _guarded(tmp_path: Path, command: str) -> tuple[int, str]:
+    # the guard as sshd runs it, with stand-ins for squeue, scancel and the clone's plyserve that echo how they were called
+    clone, bin_dir = tmp_path / "ply.serve", tmp_path / "bin"
+    for path, name in ((clone / ".venv" / "bin" / "plyserve", "plyserve"), (bin_dir / "squeue", "squeue"), (bin_dir / "scancel", "scancel")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\necho "{name} $(pwd) $*"\n')
+        path.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "SSH_ORIGINAL_COMMAND": command}
+    done = subprocess.run([str(GUARD), str(clone)], env=env, capture_output=True, text=True)
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_the_rci_guard_runs_exactly_what_remote_sends(tmp_path: Path) -> None:
+    clone = tmp_path / "ply.serve"
+    submitted = submit_command(str(clone), "qwen-3.8-27b-fp8", "long", True, None, "3-00:00:00")
+    assert _guarded(tmp_path, submitted) == (0, f"plyserve {clone} job --length long --time 3-00:00:00 -- --tunnel --monitor qwen-3.8-27b-fp8\n")
+    assert _guarded(tmp_path, submit_command(str(clone), "m", "short", False, None)) == (0, f"plyserve {clone} job --length short -- --tunnel m\n")
+    assert _guarded(tmp_path, "squeue -h -j 42 -o %T")[1] == f"squeue {Path.cwd()} -h -j 42 -o %T\n"
+    assert _guarded(tmp_path, "scancel 42")[1] == f"scancel {Path.cwd()} 42\n"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "scancel 42; id",
+        "squeue -h -j 42 -o %T && id",
+        "scp -r -f /home",
+        "internal-sftp",
+        "",
+        "bash",
+        "bash -lc 'cd /elsewhere && .venv/bin/plyserve job --length short -- --tunnel m'",
+    ],
+)
+def test_the_rci_guard_refuses_everything_else(tmp_path: Path, command: str) -> None:
+    code, output = _guarded(tmp_path, command)
+    assert code == 1 and output.startswith("rci-ssh-guard: refused")
+
+
+def test_the_rci_guard_refuses_a_model_name_with_a_shell_in_it(tmp_path: Path) -> None:
+    code, _ = _guarded(tmp_path, submit_command(str(tmp_path / "ply.serve"), "m$(id)", "short", False, None))
+    assert code == 1
